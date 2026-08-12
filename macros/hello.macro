@@ -1,0 +1,10 @@
+# The smallest useful macro: press A three times, slowly.
+#
+#   anyctrl check macros/hello.macro --timeline
+#   anyctrl run   macros/hello.macro
+
+meta name "Hello"
+meta description "Three deliberate A presses"
+
+log "pressing A three times"
+press A 100ms x3 every 400ms

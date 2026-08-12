@@ -1,0 +1,13 @@
+# Keep the console awake without touching anything that matters: nudge the
+# left stick a hair every half minute. Useful while a long download finishes.
+
+meta name "Anti idle"
+meta description "A tiny stick nudge every 30 seconds"
+meta console switch2
+
+loop forever {
+    stick L 0.15 0.0 for 120ms
+    stick L -0.15 0.0 for 120ms
+    stick L center
+    wait 30s
+}

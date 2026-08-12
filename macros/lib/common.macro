@@ -1,0 +1,31 @@
+# Reusable blocks. Pull them into a macro with:
+#
+#   include "lib/common.macro"
+
+# Confirm a dialog and give the console time to react.
+def confirm {
+    press A 80ms
+    wait 500ms
+}
+
+# Back out of a menu.
+def back {
+    press B 80ms
+    wait 400ms
+}
+
+# Open the HOME menu and wait for it to settle.
+def home {
+    press HOME 100ms
+    wait 1500ms
+}
+
+# A slow, full circle of the left stick: handy for checking that stick input
+# arrives at the console at all.
+def stick_circle {
+    stick L angle 0 1.0 for 250ms
+    stick L angle 90 1.0 for 250ms
+    stick L angle 180 1.0 for 250ms
+    stick L angle 270 1.0 for 250ms
+    stick L center
+}

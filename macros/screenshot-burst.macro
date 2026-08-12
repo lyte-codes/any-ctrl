@@ -1,0 +1,12 @@
+# Take five screenshots, a second apart.
+
+meta name "Screenshot burst"
+meta description "Five Capture presses"
+
+set press_time 120ms
+set gap 900ms
+
+loop 5 {
+    press CAPTURE
+    log "captured"
+}

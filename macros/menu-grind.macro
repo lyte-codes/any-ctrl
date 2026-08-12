@@ -1,0 +1,20 @@
+# A shape that fits a lot of grinding tasks: enter a menu, confirm twice, back
+# out, repeat. Adjust the waits to match how fast the game you are playing
+# actually responds - a macro that is faster than the game will desynchronise.
+
+meta name "Menu grind"
+meta description "Confirm-confirm-back, forever"
+
+include "lib/common.macro"
+
+# Give yourself time to put the console where it needs to be.
+log "starting in 3 seconds"
+wait 3s
+
+loop forever {
+    call confirm
+    call confirm
+    call back
+    wait 1s
+    log "one cycle done"
+}

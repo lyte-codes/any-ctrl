@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "any-ctrl"
+version = "0.1.0"
+description = "Play controller macros on a Nintendo Switch (1 or 2) from Linux or macOS"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "any-ctrl contributors" }]
+keywords = ["nintendo", "switch", "macro", "controller", "bluetooth", "hid"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Games/Entertainment",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# Linux-only: emulate a Pro Controller over Bluetooth with BlueZ.
+bluez = ["dbus-python>=1.2.16"]
+# Any OS: drive a USB micro-controller bridge over a serial port.
+serial = ["pyserial>=3.5"]
+dev = ["pytest>=7.4", "ruff>=0.4"]
+
+[project.urls]
+Homepage = "https://github.com/lyte-codes/any-ctrl"
+Issues = "https://github.com/lyte-codes/any-ctrl/issues"
+
+[project.scripts]
+anyctrl = "anyctrl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4"]
