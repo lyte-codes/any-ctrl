@@ -77,6 +77,7 @@ class Code(IntEnum):
     # 0x6xxx - the console
     NO_CONSOLE_CONNECTION = 0x6001
     HANDSHAKE_INCOMPLETE = 0x6002
+    CONSOLE_ATTEMPT_REJECTED = 0x6003
 
     @property
     def hex(self) -> str:
@@ -130,7 +131,19 @@ REMEDIES: dict[Code, str] = {
         "the test: inquiry and connection attempts from it will show up there"
     ),
     Code.HANDSHAKE_INCOMPLETE: "the console connected but never finished setting us up",
+    Code.CONSOLE_ATTEMPT_REJECTED: (
+        "the console did try to connect and the link did not complete, so the fault is on "
+        "this side: look at the captured trace for the failure reason, most often pairing "
+        "or authentication being refused"
+    ),
 }
+
+#: Lines in a btmon trace that prove the console reached us. Inquiry responses
+#: are answered by the controller firmware without troubling the host, so a
+#: connection request is the first thing that shows up in a trace at all.
+CONTACT_MARKERS = ("Connect Request", "Connect Complete", "Link Key Request", "IO Capability")
+#: Evidence that a connection that did start then failed.
+FAILURE_MARKERS = ("Authentication Complete", "Disconnect Complete", "Simple Pairing Complete")
 
 
 @dataclass
@@ -476,6 +489,62 @@ def check_serial(report: Report, *, advisory: bool = False) -> None:
         )
 
 
+class _HciTrace:
+    """Capture the radio with ``btmon`` for the duration of a live test.
+
+    A live test that reports "nothing connected" cannot say whether the console
+    stayed silent or tried and was turned away — and those point in opposite
+    directions. The host never sees inquiry responses (the controller firmware
+    answers those itself), so a connection request is the first evidence that
+    exists, and it only exists in an HCI trace.
+    """
+
+    def __init__(self) -> None:
+        self.path: Path | None = None
+        self._process: subprocess.Popen | None = None
+        self._handle = None
+
+    def start(self) -> str | None:
+        if not shutil.which("btmon"):
+            return None
+        self.path = Path(f"/tmp/anyctrl-hci-{os.getpid()}.log")
+        try:
+            self._handle = self.path.open("w")
+            self._process = subprocess.Popen(
+                ["btmon"], stdout=self._handle, stderr=subprocess.DEVNULL, text=True
+            )
+        except OSError:
+            self.path = None
+            return None
+        return str(self.path)
+
+    def stop(self) -> str:
+        if self._process is not None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:  # pragma: no cover - best effort
+                self._process.kill()
+            self._process = None
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+        if self.path is None or not self.path.exists():
+            return ""
+        try:
+            return self.path.read_text(errors="replace")
+        except OSError:  # pragma: no cover - best effort
+            return ""
+
+    @staticmethod
+    def summarise(trace: str) -> tuple[bool, list[str]]:
+        """Did anything try to connect, and which markers were seen?"""
+        seen = [marker for marker in CONTACT_MARKERS if marker in trace]
+        seen += [marker for marker in FAILURE_MARKERS if marker in trace]
+        contacted = any(marker in trace for marker in CONTACT_MARKERS)
+        return contacted, seen
+
+
 def check_live_advertising(report: Report, adapter: str, seconds: float, console) -> None:
     """Advertise as a controller for real and see whether anything connects.
 
@@ -488,17 +557,40 @@ def check_live_advertising(report: Report, adapter: str, seconds: float, console
 
     backend = BluezBackend(console=console, adapter=adapter)
     backend.on_status = lambda message: print(f"      {message}")
+
+    trace = _HciTrace()
+    trace_path = trace.start()
+    if trace_path:
+        report.add(Check("hci capture", True, detail=f"recording to {trace_path}"))
+    else:
+        report.add(
+            Check("hci capture", True, detail="btmon not installed, no radio trace", skipped=True)
+        )
+
     try:
         backend.connect(timeout=seconds)
     except BackendError as exc:
         message = str(exc)
+        contacted, markers = _HciTrace.summarise(trace.stop())
         if "timed out waiting for the console" in message:
+            if contacted:
+                report.add(
+                    Check(
+                        "live advertising",
+                        False,
+                        Code.CONSOLE_ATTEMPT_REJECTED,
+                        f"a console did reach us ({', '.join(markers)}) but the link never "
+                        f"completed; trace: {trace_path or 'not captured'}",
+                    )
+                )
+                return
             report.add(
                 Check(
                     "live advertising",
                     False,
                     Code.NO_CONSOLE_CONNECTION,
-                    f"advertised for {seconds:g}s, nothing connected",
+                    f"advertised for {seconds:g}s, and nothing on the radio even tried"
+                    + (f" (trace: {trace_path})" if trace_path else ""),
                 )
             )
         elif "never finished setting the controller up" in message:
@@ -511,10 +603,12 @@ def check_live_advertising(report: Report, adapter: str, seconds: float, console
             report.add(Check("live advertising", False, Code.NO_CONSOLE_CONNECTION, message))
         return
     except Exception as exc:  # pragma: no cover - unexpected, still worth coding
+        trace.stop()
         report.add(Check("live advertising", False, Code.SDP_REGISTER_FAILED, str(exc)))
         return
     finally:
         backend.close()
+    trace.stop()
 
     report.add(
         Check(

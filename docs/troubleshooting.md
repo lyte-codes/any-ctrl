@@ -29,7 +29,8 @@ failure — checks run in dependency order, so that first code is the one to fix
 | `0x2101` | no hciconfig or btmgmt | | |
 | `0x2102` | class of device write failed | | |
 | `0x2103` | class of device reverted | `0x6001` | no console connected |
-| `0x2104` | class of device unreadable | `0x6002` | handshake never completed |
+| `0x2104` | class of device unreadable | `0x6003` | console tried, link failed |
+| | | `0x6002` | handshake never completed |
 
 `anyctrl doctor` still covers the basics below.
 
@@ -108,19 +109,25 @@ and the console still ignores it. In order of likelihood:
    run; without either, a console can find the adapter but never complete a
    connection. `--verbose` prints both states.
 
-To find out whether the console is even trying, watch the radio while the test
-runs:
+`--live` captures the radio itself when `btmon` is installed
+(`sudo apt install bluez`), and reads the trace for you, which splits `0x6001`
+into two very different diagnoses:
+
+- **`0x6001`** — nothing on the radio even tried. The console never reached us,
+  so no adapter tweak will help: look at the console's own state (stale
+  pairing, not on the grip screen) and at distance.
+- **`0x6003`** — a console *did* reach us and the link did not complete. The
+  fault is on this side, and the trace names the step that failed.
+
+Reading a trace by hand is thankless: a busy room fills it with LE
+advertisements from phones, watches and hearing aids, none of which is a
+console — the Switch speaks classic BR/EDR. The markers worth grepping for are
+`Connect Request`, `IO Capability`, `Link Key Request` and
+`Simple Pairing Complete`:
 
 ```bash
-sudo btmon                                   # in another terminal
-sudo anyctrl diagnose --live 3m
+grep -nE "Connect Request|IO Capability|Link Key|Simple Pairing|Auth" /tmp/anyctrl-hci-*.log
 ```
-
-Inquiry scans and connection attempts from the console appear in `btmon` as
-they happen. Nothing there at all means the console is not reaching us, and no
-amount of adapter configuration will change that — look at the console's own
-state and at distance/interference. Attempts that appear and then fail put the
-fault back on this side, and the failure reason will be in that output.
 
 ## bluez: the handshake never completes
 

@@ -150,3 +150,50 @@ def test_json_reports_the_route(capsys):
     main(["diagnose", "--json", "--path", "serial"])
     payload = json.loads(capsys.readouterr().out)
     assert payload["path"] == "serial"
+
+
+# -- radio trace ------------------------------------------------------------
+
+
+def test_trace_summary_spots_a_connection_attempt():
+    from anyctrl.diagnostics import _HciTrace
+
+    trace = "> HCI Event: Connect Request (0x04) plen 10\n        Address: 98:B6:E9:11:22:33\n"
+    contacted, markers = _HciTrace.summarise(trace)
+    assert contacted
+    assert "Connect Request" in markers
+
+
+def test_trace_summary_ignores_le_advertising_noise():
+    from anyctrl.diagnostics import _HciTrace
+
+    # Exactly the kind of thing a busy room produces: LE adverts from phones,
+    # hearing aids and watches. None of it is a console, which speaks BR/EDR.
+    trace = (
+        "> HCI Event: LE Meta Event (0x3e) plen 28\n"
+        "      LE Advertising Report (0x02)\n"
+        "        Address: 3A:D4:9C:5C:09:A8 (Non-Resolvable)\n"
+        "        Company: Apple, Inc. (76)\n"
+    )
+    contacted, markers = _HciTrace.summarise(trace)
+    assert not contacted
+    assert markers == []
+
+
+def test_trace_summary_reports_a_failed_pairing():
+    from anyctrl.diagnostics import _HciTrace
+
+    trace = "Connect Request\nIO Capability\nSimple Pairing Complete\nDisconnect Complete\n"
+    contacted, markers = _HciTrace.summarise(trace)
+    assert contacted
+    assert "Simple Pairing Complete" in markers
+    assert "Disconnect Complete" in markers
+
+
+def test_trace_start_is_a_no_op_without_btmon(monkeypatch):
+    from anyctrl.diagnostics import _HciTrace
+
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    trace = _HciTrace()
+    assert trace.start() is None
+    assert trace.stop() == ""
