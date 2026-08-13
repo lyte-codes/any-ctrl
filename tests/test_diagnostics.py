@@ -197,3 +197,29 @@ def test_trace_start_is_a_no_op_without_btmon(monkeypatch):
     trace = _HciTrace()
     assert trace.start() is None
     assert trace.stop() == ""
+
+
+def test_feature_listings_are_not_mistaken_for_a_pairing_attempt():
+    from anyctrl.diagnostics import _HciTrace
+
+    # btmon prints "Secure Simple Pairing" among the adapter's own supported
+    # features at startup. It says nothing about a console having appeared.
+    trace = (
+        "        Features: 0xff 0xff 0x8f 0xfe 0xdb 0xff 0x5b 0x87\n"
+        "          Secure Simple Pairing\n"
+        "          Encapsulated PDU\n"
+    )
+    contacted, markers = _HciTrace.summarise(trace)
+    assert not contacted, "a feature listing is not contact"
+    assert "Connect Request" not in markers
+
+
+def test_scan_enable_is_read_from_the_trace():
+    from anyctrl.diagnostics import _HciTrace
+
+    command = "< HCI Command: Write Scan Enable (0x03|0x001a) plen 1\n"
+    both = command + "        Scan enable: Inquiry Scan + Page Scan (0x03)\n"
+    page_only = command + "        Scan enable: Page Scan (0x02)\n"
+    assert _HciTrace.scanning_enabled(both) is True
+    assert _HciTrace.scanning_enabled(page_only) is False
+    assert _HciTrace.scanning_enabled("nothing relevant here") is None

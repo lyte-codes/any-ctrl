@@ -145,6 +145,10 @@ CONTACT_MARKERS = ("Connect Request", "Connect Complete", "Link Key Request", "I
 #: Evidence that a connection that did start then failed.
 FAILURE_MARKERS = ("Authentication Complete", "Disconnect Complete", "Simple Pairing Complete")
 
+#: How btmon renders the scan-enable command and the value we need from it.
+SCAN_ENABLE_MARKER = "Write Scan Enable"
+SCAN_BOTH_MARKER = "Inquiry Scan + Page Scan"
+
 
 @dataclass
 class Check:
@@ -538,11 +542,28 @@ class _HciTrace:
 
     @staticmethod
     def summarise(trace: str) -> tuple[bool, list[str]]:
-        """Did anything try to connect, and which markers were seen?"""
+        """Did anything try to connect, and which markers were seen?
+
+        Only markers that mean a remote device acted on us count. Beware of
+        near-misses: "Secure Simple Pairing" appears in the adapter's own
+        feature listings at startup and proves nothing about a console.
+        """
         seen = [marker for marker in CONTACT_MARKERS if marker in trace]
         seen += [marker for marker in FAILURE_MARKERS if marker in trace]
         contacted = any(marker in trace for marker in CONTACT_MARKERS)
         return contacted, seen
+
+    @staticmethod
+    def scanning_enabled(trace: str) -> bool | None:
+        """Did the controller actually accept inquiry *and* page scan?
+
+        Setting scan mode through BlueZ can silently not reach the hardware.
+        The trace settles it: the HCI command and its value are right there.
+        ``None`` when the trace never mentions scan enable at all.
+        """
+        if SCAN_ENABLE_MARKER not in trace:
+            return None
+        return SCAN_BOTH_MARKER in trace
 
 
 def check_live_advertising(report: Report, adapter: str, seconds: float, console) -> None:
@@ -571,7 +592,8 @@ def check_live_advertising(report: Report, adapter: str, seconds: float, console
         backend.connect(timeout=seconds)
     except BackendError as exc:
         message = str(exc)
-        contacted, markers = _HciTrace.summarise(trace.stop())
+        trace_text = trace.stop()
+        contacted, markers = _HciTrace.summarise(trace_text)
         if "timed out waiting for the console" in message:
             if contacted:
                 report.add(
@@ -584,12 +606,28 @@ def check_live_advertising(report: Report, adapter: str, seconds: float, console
                     )
                 )
                 return
+            scanning = _HciTrace.scanning_enabled(trace_text)
+            if scanning is False:
+                # The console cannot be blamed for ignoring an adapter that
+                # never became discoverable and connectable at the HCI level.
+                report.add(
+                    Check(
+                        "live advertising",
+                        False,
+                        Code.PAGE_SCAN_DISABLED,
+                        "the controller never accepted inquiry + page scan, so the console "
+                        f"could not see us (trace: {trace_path})",
+                    )
+                )
+                return
             report.add(
                 Check(
                     "live advertising",
                     False,
                     Code.NO_CONSOLE_CONNECTION,
-                    f"advertised for {seconds:g}s, and nothing on the radio even tried"
+                    f"advertised for {seconds:g}s"
+                    + (", scan enable confirmed on the radio" if scanning else "")
+                    + ", and nothing on the radio even tried"
                     + (f" (trace: {trace_path})" if trace_path else ""),
                 )
             )
