@@ -84,8 +84,10 @@ exit — including after Ctrl-C.
 
 A micro-controller plugs into the console's USB port and enumerates as a wired
 controller; any-ctrl talks to it over a serial link. This is the only option on
-macOS, and a good option on Linux when you would rather not disturb the
-Bluetooth stack.
+macOS — which can be neither a Bluetooth HID device nor a USB device, so it
+cannot be the controller itself — and a good option on Linux when you would
+rather not disturb the Bluetooth stack. A [Raspberry Pi](raspberry-pi.md)
+running the `bluez` backend is the other way for a Mac owner to get there.
 
 ```bash
 pip install 'any-ctrl[serial]'
@@ -93,9 +95,18 @@ anyctrl ports                                     # find the adapter
 anyctrl run macro.macro --backend serial --port /dev/tty.usbserial-A50285BI
 ```
 
-Without `--port`, any-ctrl picks the first port whose USB IDs match a board it
-recognises. On connect it exchanges a HELLO/BANNER greeting with the firmware,
-so a wiring or baud mistake is reported straight away.
+The port you want is usually **not** the board. In the running arrangement the
+board's USB cable goes to the console, and the host is wired to the board's
+UART through a USB-to-serial adapter — a CH340, CP2102 or FTDI — so that
+adapter is what appears on the host. The board's own USB IDs only show up while
+you are flashing it. any-ctrl recognises both, and `anyctrl ports` marks
+anything that could be a bridge with `+`.
+
+Without `--port`, any-ctrl picks the first recognised candidate and refuses to
+guess otherwise: silently choosing something like macOS's
+`/dev/cu.Bluetooth-Incoming-Port` only produces a baffling handshake timeout.
+On connect it exchanges a HELLO/BANNER greeting with the firmware, so a wiring
+or baud mistake is reported straight away.
 
 Building the board — wiring, flashing, and the USB VID/PID override the console
 requires — is covered in [`firmware/README.md`](../firmware/README.md).

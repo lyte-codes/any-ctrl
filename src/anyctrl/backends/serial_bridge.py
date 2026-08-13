@@ -40,21 +40,48 @@ MSG_LOG = 0x8F
 DEFAULT_BAUD = 115200
 BANNER_PREFIX = "anyctrl-bridge"
 
-#: USB IDs of boards known to run the reference firmware, most specific first.
-KNOWN_BOARDS: tuple[tuple[int, int, str], ...] = (
-    (0x2341, 0x8036, "Arduino Leonardo"),
-    (0x2341, 0x8037, "Arduino Micro"),
-    (0x1B4F, 0x9205, "SparkFun Pro Micro 5V"),
-    (0x1B4F, 0x9206, "SparkFun Pro Micro 3V3"),
-    (0x2E8A, 0x000A, "Raspberry Pi Pico"),
-    (0x2E8A, 0x0003, "Raspberry Pi Pico (bootloader)"),
-    (0x16C0, 0x0483, "Teensy"),
+#: USB IDs any-ctrl recognises, as ``(vid, pid, name, kind)``.
+#:
+#: Two different things can be on the other end of the port, and which one it
+#: is depends on where the board's own USB cable goes. In the normal running
+#: arrangement the board is plugged into the *console*, so the computer sees a
+#: USB-to-serial **adapter** wired to the board's UART. When the board is
+#: plugged into the computer instead — while flashing it, or on a board whose
+#: USB stays with the host — the computer sees the **board** itself.
+KNOWN_DEVICES: tuple[tuple[int, int, str, str], ...] = (
+    # USB-to-serial adapters: what the host sees in the normal wiring.
+    (0x1A86, 0x7523, "CH340 serial adapter", "adapter"),
+    (0x1A86, 0x5523, "CH341 serial adapter", "adapter"),
+    (0x1A86, 0x55D4, "CH9102 serial adapter", "adapter"),
+    (0x10C4, 0xEA60, "CP2102 serial adapter", "adapter"),
+    (0x10C4, 0xEA70, "CP2105 serial adapter", "adapter"),
+    (0x0403, 0x6001, "FTDI FT232 serial adapter", "adapter"),
+    (0x0403, 0x6015, "FTDI FT231X serial adapter", "adapter"),
+    (0x067B, 0x2303, "Prolific PL2303 serial adapter", "adapter"),
+    # Micro-controller boards: what the host sees while flashing.
+    (0x2341, 0x8036, "Arduino Leonardo", "board"),
+    (0x2341, 0x8037, "Arduino Micro", "board"),
+    (0x1B4F, 0x9205, "SparkFun Pro Micro 5V", "board"),
+    (0x1B4F, 0x9206, "SparkFun Pro Micro 3V3", "board"),
+    (0x2E8A, 0x000A, "Raspberry Pi Pico", "board"),
+    (0x2E8A, 0x0003, "Raspberry Pi Pico (bootloader)", "board"),
+    (0x16C0, 0x0483, "Teensy", "board"),
+)
+
+#: Ports the operating system always offers and which never lead to a bridge.
+#: Picking one of these by accident produces a baffling "no response" timeout,
+#: so they are excluded from automatic selection.
+BUILTIN_PORT_MARKERS: tuple[str, ...] = (
+    "Bluetooth-Incoming-Port",
+    "Bluetooth-Modem",
+    "debug-console",
+    "wlan-debug",
 )
 
 
 @dataclass(frozen=True)
 class SerialPort:
-    """A candidate serial port found while scanning."""
+    """A serial port found while scanning, and what we make of it."""
 
     device: str
     description: str
@@ -62,15 +89,37 @@ class SerialPort:
     pid: int | None = None
 
     @property
-    def known_board(self) -> str | None:
-        for vid, pid, name in KNOWN_BOARDS:
+    def known_device(self) -> tuple[str, str] | None:
+        """``(name, kind)`` when the USB IDs are recognised."""
+        for vid, pid, name, kind in KNOWN_DEVICES:
             if self.vid == vid and self.pid == pid:
-                return name
+                return (name, kind)
         return None
 
+    @property
+    def known_board(self) -> str | None:
+        """The recognised device's name, or ``None``."""
+        known = self.known_device
+        return known[0] if known else None
+
+    @property
+    def is_builtin(self) -> bool:
+        """True for ports the OS provides that cannot host a bridge."""
+        return any(marker.lower() in self.device.lower() for marker in BUILTIN_PORT_MARKERS)
+
+    @property
+    def is_candidate(self) -> bool:
+        """Could a bridge plausibly be on the other end of this port?"""
+        return self.known_device is not None and not self.is_builtin
+
     def __str__(self) -> str:  # pragma: no cover - display only
-        board = self.known_board
-        suffix = f" [{board}]" if board else ""
+        known = self.known_device
+        if known:
+            suffix = f" [{known[0]}]"
+        elif self.is_builtin:
+            suffix = " [built-in, not a bridge]"
+        else:
+            suffix = " [unrecognised]"
         return f"{self.device} - {self.description}{suffix}"
 
 
@@ -128,8 +177,25 @@ def list_ports() -> list[SerialPort]:
         )
         for port in _list_ports.comports()
     ]
-    ports.sort(key=lambda port: (port.known_board is None, port.device))
+    ports.sort(key=_port_rank)
     return ports
+
+
+def _port_rank(port: SerialPort) -> tuple[int, str]:
+    """Order ports by how likely they are to be the bridge.
+
+    Adapters first, since that is the normal wiring, then boards, then
+    unrecognised ports, and finally the OS's own built-ins, which never lead
+    anywhere.
+    """
+    known = port.known_device
+    if port.is_builtin:
+        rank = 3
+    elif known is None:
+        rank = 2
+    else:
+        rank = 0 if known[1] == "adapter" else 1
+    return (rank, port.device)
 
 
 class SerialBridgeBackend(ControllerBackend):
@@ -186,14 +252,28 @@ class SerialBridgeBackend(ControllerBackend):
         self._connected = True
 
     def _autodetect(self) -> str:
+        """Pick a port, but only one that could actually be a bridge.
+
+        Guessing at an unrecognised port is worse than refusing: the console
+        does nothing, and the only symptom is a handshake timeout on a port
+        that was never going to work.
+        """
         ports = list_ports()
         if not ports:
             raise BackendError(
-                "no serial ports found; connect the bridge board and pass --port if needed"
+                "no serial ports found; connect the USB-to-serial adapter wired to the "
+                "bridge board, or pass --port explicitly"
             )
-        known = [port for port in ports if port.known_board]
-        chosen = known[0] if known else ports[0]
-        return chosen.device
+        candidates = [port for port in ports if port.is_candidate]
+        if not candidates:
+            listing = "\n  ".join(str(port) for port in ports)
+            raise BackendError(
+                "no bridge adapter recognised among the available serial ports:\n  "
+                f"{listing}\n"
+                "Connect a USB-to-serial adapter wired to the board (see "
+                "firmware/README.md), or name the port yourself with --port."
+            )
+        return candidates[0].device
 
     def _handshake(self, timeout: float) -> None:
         self._write(encode_frame(MSG_HELLO))
@@ -278,11 +358,18 @@ class SerialBridgeBackend(ControllerBackend):
                 "pyserial missing: pip install 'any-ctrl[serial]'",
             )
         ports = list_ports()
-        known = [port for port in ports if port.known_board]
-        if known:
-            return BackendStatus(cls.name, cls.description, True, f"bridge candidate {known[0]}")
-        if ports:
+        candidates = [port for port in ports if port.is_candidate]
+        if candidates:
             return BackendStatus(
-                cls.name, cls.description, True, f"{len(ports)} serial port(s), none recognised"
+                cls.name, cls.description, True, f"bridge candidate {candidates[0]}"
+            )
+        if ports:
+            # Ports exist, but none of them can be a bridge. Reporting this as
+            # "available" would send the user into a handshake timeout.
+            return BackendStatus(
+                cls.name,
+                cls.description,
+                False,
+                f"{len(ports)} serial port(s), none is a bridge adapter (use --port to override)",
             )
         return BackendStatus(cls.name, cls.description, False, "no serial ports found")

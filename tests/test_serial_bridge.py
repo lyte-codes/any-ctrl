@@ -17,6 +17,7 @@ from anyctrl.backends.serial_bridge import (
     SerialPort,
     decode_frames,
     encode_frame,
+    list_ports,
 )
 from anyctrl.controller.buttons import Button
 from anyctrl.controller.state import ControllerState
@@ -181,3 +182,100 @@ def test_known_boards_are_recognised():
     assert leonardo.known_board == "Arduino Leonardo"
     assert unknown.known_board is None
     assert "Arduino Leonardo" in str(leonardo)
+
+
+# -- port classification and selection --------------------------------------
+
+
+def macos_builtin_ports() -> list[SerialPort]:
+    """The ports a stock Mac offers with nothing plugged in."""
+    return [
+        SerialPort("/dev/cu.Bluetooth-Incoming-Port", "n/a"),
+        SerialPort("/dev/cu.debug-console", "n/a"),
+        SerialPort("/dev/cu.IDW28BT", "n/a"),
+    ]
+
+
+def test_builtin_ports_are_never_bridge_candidates():
+    for port in macos_builtin_ports():
+        assert not port.is_candidate
+    assert SerialPort("/dev/cu.Bluetooth-Incoming-Port", "n/a").is_builtin
+
+
+def test_a_usb_serial_adapter_is_a_candidate():
+    # The host sees the adapter, not the board: the board's USB goes to the
+    # console in the normal wiring.
+    adapter = SerialPort("/dev/cu.usbserial-1420", "USB Serial", vid=0x1A86, pid=0x7523)
+    assert adapter.is_candidate
+    assert adapter.known_device == ("CH340 serial adapter", "adapter")
+
+
+def test_a_board_plugged_into_the_host_is_also_a_candidate():
+    board = SerialPort("/dev/cu.usbmodem1401", "Pro Micro", vid=0x1B4F, pid=0x9205)
+    assert board.is_candidate
+    assert board.known_device == ("SparkFun Pro Micro 5V", "board")
+
+
+def test_autodetect_refuses_to_guess_at_unrecognised_ports(monkeypatch, fake_serial):
+    monkeypatch.setattr("anyctrl.backends.serial_bridge.list_ports", macos_builtin_ports)
+    backend = SerialBridgeBackend()
+    with pytest.raises(BackendError, match="no bridge adapter recognised"):
+        backend.connect()
+
+
+def test_autodetect_reports_when_there_are_no_ports_at_all(monkeypatch, fake_serial):
+    monkeypatch.setattr("anyctrl.backends.serial_bridge.list_ports", list)
+    backend = SerialBridgeBackend()
+    with pytest.raises(BackendError, match="no serial ports found"):
+        backend.connect()
+
+
+def test_autodetect_picks_the_adapter_over_the_noise(monkeypatch, fake_serial):
+    adapter = SerialPort("/dev/cu.usbserial-1420", "USB Serial", vid=0x1A86, pid=0x7523)
+    monkeypatch.setattr(
+        "anyctrl.backends.serial_bridge.list_ports",
+        lambda: [*macos_builtin_ports(), adapter],
+    )
+    backend = SerialBridgeBackend()
+    backend.connect()
+    assert backend.port == adapter.device
+    backend.close()
+
+
+def test_status_is_honest_when_no_bridge_is_attached(monkeypatch, fake_serial):
+    monkeypatch.setattr("anyctrl.backends.serial_bridge.list_ports", macos_builtin_ports)
+    status = SerialBridgeBackend.status()
+    assert not status.available
+    assert "none is a bridge adapter" in status.detail
+
+
+def test_status_reports_ready_once_an_adapter_appears(monkeypatch, fake_serial):
+    adapter = SerialPort("/dev/cu.usbserial-1420", "USB Serial", vid=0x10C4, pid=0xEA60)
+    monkeypatch.setattr("anyctrl.backends.serial_bridge.list_ports", lambda: [adapter])
+    status = SerialBridgeBackend.status()
+    assert status.available
+    assert "CP2102" in status.detail
+
+
+def test_ports_are_ranked_adapter_board_unknown_builtin(monkeypatch):
+    adapter = SerialPort("/dev/cu.usbserial-1", "adapter", vid=0x0403, pid=0x6001)
+    board = SerialPort("/dev/cu.usbmodem-2", "board", vid=0x2341, pid=0x8036)
+    unknown = SerialPort("/dev/cu.mystery-3", "mystery")
+    builtin = SerialPort("/dev/cu.Bluetooth-Incoming-Port", "n/a")
+
+    class FakeComPort:
+        def __init__(self, port):
+            self.device = port.device
+            self.description = port.description
+            self.vid = port.vid
+            self.pid = port.pid
+
+    scrambled = [builtin, unknown, board, adapter]
+    module = types.ModuleType("serial.tools.list_ports")
+    module.comports = lambda: [FakeComPort(port) for port in scrambled]
+    monkeypatch.setitem(sys.modules, "serial", types.ModuleType("serial"))
+    monkeypatch.setitem(sys.modules, "serial.tools", types.ModuleType("serial.tools"))
+    monkeypatch.setitem(sys.modules, "serial.tools.list_ports", module)
+
+    ordered = [port.device for port in list_ports()]
+    assert ordered == [adapter.device, board.device, unknown.device, builtin.device]

@@ -297,8 +297,17 @@ def cmd_ports(args: argparse.Namespace) -> int:
         print("install pyserial with: pip install 'any-ctrl[serial]'")
         return 1
     for port in ports:
-        print(port)
-    return 0
+        mark = "+" if port.is_candidate else "-"
+        print(f"{mark} {port}")
+    candidates = [port for port in ports if port.is_candidate]
+    print()
+    if candidates:
+        print(f"bridge candidate: {candidates[0].device}")
+        return 0
+    print("no bridge adapter found among these ports.")
+    print("The host talks to the board through a USB-to-serial adapter (CH340, CP2102,")
+    print("FTDI); the board's own USB port goes to the console. See firmware/README.md.")
+    return 1
 
 
 def cmd_buttons(args: argparse.Namespace) -> int:
@@ -344,13 +353,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("\nmacos")
         print("  --  macOS cannot act as a Bluetooth HID device; use the serial bridge")
         ports = list_ports()
+        candidates = [port for port in ports if port.is_candidate]
         if ports:
-            print(f"  ok  {len(ports)} serial port(s):")
+            print(f"  --  {len(ports)} serial port(s):")
             for port in ports:
                 print(f"        {port}")
         else:
+            print("  no  no serial ports found")
+        if candidates:
+            print(f"  ok  bridge adapter detected: {candidates[0].device}")
+        else:
             problems += 1
-            print("  no  no serial ports found; plug in a bridge board")
+            print("  no  no bridge adapter among them")
+            print("      the host connects to the board's UART through a USB-to-serial")
+            print("      adapter; the board's own USB goes to the console")
 
     print()
     usable = available_backends()

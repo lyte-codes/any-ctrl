@@ -86,19 +86,33 @@ Full setup, including the `bluetoothd` paths per distribution, is in
 
 ### macOS, over a USB bridge
 
-macOS cannot present itself as a Bluetooth HID device — no application can, the
-capability is not exposed — so a Mac drives the console through a
+A Mac cannot drive a console on its own, and no amount of software fixes that:
+macOS exposes only the Bluetooth HID *host* role, and a Mac is a USB host
+rather than a USB device, so it can be neither a wireless nor a wired
+controller. Something else has to be the controller. The usual answer is a
 micro-controller that plugs into the console's USB port and enumerates as a
-wired controller. A Pro Micro, a Leonardo or an RP2040 plus a USB-to-serial
-adapter is all it takes; the firmware and wiring are in
-[`firmware/README.md`](firmware/README.md).
+wired controller, driven from the Mac over a serial link. A Pro Micro, a
+Leonardo or an RP2040 plus a USB-to-serial adapter is all it takes; the
+firmware and wiring are in [`firmware/README.md`](firmware/README.md).
 
 ```bash
 anyctrl ports
 anyctrl run macros/hello.macro --backend serial --port /dev/tty.usbserial-XXXX
 ```
 
+Note what your computer is actually connected to: the board's own USB port goes
+to the *console*, so the port you name here belongs to the USB-to-serial
+adapter wired to the board's UART. `anyctrl ports` marks the ones that could be
+a bridge with `+`.
+
 The same path works on Linux, and is the more robust option on a Switch 2.
+
+### Linux by proxy: a Raspberry Pi
+
+If you have a Pi, it is the least fiddly option of all — its built-in Bluetooth
+does the job with no board, no adapter and no wiring, and you drive it over SSH
+from whatever machine you like, Mac included. `./scripts/setup-pi.sh` sets it
+up; see [`docs/raspberry-pi.md`](docs/raspberry-pi.md).
 
 ### Neither, yet
 
@@ -166,7 +180,7 @@ report if the host stops talking to it, so a crash cannot leave a button stuck.
 
 ```bash
 pip install '.[dev]'
-pytest        # 137 tests, no hardware required
+pytest        # 146 tests, no hardware required
 ruff check .
 ```
 

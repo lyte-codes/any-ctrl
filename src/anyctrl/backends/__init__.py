@@ -71,12 +71,15 @@ def create_backend(name: str = "auto", /, **options: Any) -> ControllerBackend:
                 "'pip install any-ctrl[serial]'. Run 'anyctrl doctor' for details."
             )
         name = candidates[0]
+        # Only automatic selection is gated on readiness. Naming a backend
+        # explicitly is taken as "I know what I am doing" - the user may be
+        # pointing at a port autodetection cannot recognise - and any real
+        # problem surfaces from connect() with a specific message.
+        status = BACKENDS[name].status()
+        if not status.available:  # pragma: no cover - available_backends filters these
+            raise BackendUnavailable(f"backend {name!r} is unavailable: {status.detail}")
 
     backend_class = get_backend_class(name)
-    status = backend_class.status()
-    if not status.available:
-        raise BackendUnavailable(f"backend {name!r} is unavailable: {status.detail}")
-
     parameters = inspect.signature(backend_class.__init__).parameters
     accepted = {key: value for key, value in options.items() if key in parameters}
     return backend_class(**accepted)
