@@ -130,14 +130,24 @@ class Check:
     code: Code = Code.OK
     detail: str = ""
     skipped: bool = False
+    #: A problem with a route this machine is not taking. Worth printing - a
+    #: missing bridge matters the day Bluetooth stops working - but it must
+    #: never mask a fault on the route actually in use, or gate the live test.
+    advisory: bool = False
 
     @property
     def hint(self) -> str:
         return "" if self.ok else REMEDIES.get(self.code, "")
 
+    @property
+    def counts_as_failure(self) -> bool:
+        return not self.ok and not self.skipped and not self.advisory
+
     def __str__(self) -> str:
         if self.skipped:
             return f"-- {Code.OK.hex}  {self.name}: skipped ({self.detail})"
+        if not self.ok and self.advisory:
+            return f"-- {self.code.hex}  {self.name}: {self.detail} (not the route in use)"
         mark = "ok" if self.ok else "NO"
         code = Code.OK.hex if self.ok else self.code.hex
         line = f"{mark} {code}  {self.name}: {self.detail}"
@@ -156,9 +166,16 @@ class Report:
         self.checks.append(check)
         return check
 
+    #: Which route was diagnosed: "bluez" or "serial".
+    path: str = "bluez"
+
     @property
     def failures(self) -> list[Check]:
-        return [check for check in self.checks if not check.ok and not check.skipped]
+        return [check for check in self.checks if check.counts_as_failure]
+
+    @property
+    def advisories(self) -> list[Check]:
+        return [check for check in self.checks if not check.ok and check.advisory]
 
     @property
     def code(self) -> Code:
@@ -169,12 +186,14 @@ class Report:
     def to_dict(self) -> dict:
         return {
             "code": self.code.hex,
+            "path": self.path,
             "status": "ok" if self.code is Code.OK else "fail",
             "checks": [
                 {
                     "name": check.name,
                     "ok": check.ok,
                     "skipped": check.skipped,
+                    "advisory": check.advisory,
                     "code": (Code.OK if check.ok else check.code).hex,
                     "detail": check.detail,
                     "hint": check.hint,
@@ -193,7 +212,7 @@ def _run(command: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(command, capture_output=True, text=True, check=False)
 
 
-def check_platform(report: Report) -> bool:
+def check_platform(report: Report, *, advisory: bool = False) -> bool:
     """Platform, Python and privileges. Returns False if nothing else can run."""
     if sys.platform != "linux":
         report.add(
@@ -202,6 +221,7 @@ def check_platform(report: Report) -> bool:
                 False,
                 Code.NOT_LINUX,
                 f"{platform.system()} cannot emulate a Bluetooth controller",
+                advisory=advisory,
             )
         )
         return False
@@ -380,20 +400,24 @@ def check_device_class(report: Report, adapter: str, *, live: bool) -> None:
         )
 
 
-def check_serial(report: Report) -> None:
+def check_serial(report: Report, *, advisory: bool = False) -> None:
     """The USB bridge side, which matters on macOS and as a fallback."""
     from anyctrl.backends.serial_bridge import list_ports
 
     try:
         import serial  # noqa: F401
     except ImportError:
-        report.add(Check("pyserial", False, Code.PYSERIAL_MISSING, "not installed"))
+        report.add(
+            Check("pyserial", False, Code.PYSERIAL_MISSING, "not installed", advisory=advisory)
+        )
         return
     report.add(Check("pyserial", True, detail="installed"))
 
     ports = list_ports()
     if not ports:
-        report.add(Check("serial ports", False, Code.NO_SERIAL_PORTS, "none found"))
+        report.add(
+            Check("serial ports", False, Code.NO_SERIAL_PORTS, "none found", advisory=advisory)
+        )
         return
     candidates = [port for port in ports if port.is_candidate]
     if candidates:
@@ -405,6 +429,7 @@ def check_serial(report: Report) -> None:
                 False,
                 Code.NO_BRIDGE_ADAPTER,
                 f"{len(ports)} port(s), none recognised as a bridge",
+                advisory=advisory,
             )
         )
 
@@ -464,27 +489,48 @@ def check_live_advertising(report: Report, adapter: str, seconds: float, console
 # ---------------------------------------------------------------------------
 
 
-def diagnose(*, adapter: str = "hci0", live: float = 0.0, console=None) -> Report:
-    """Run every applicable check, in dependency order."""
+def diagnose(
+    *, adapter: str = "hci0", live: float = 0.0, console=None, path: str = "auto"
+) -> Report:
+    """Run every applicable check, in dependency order.
+
+    ``path`` selects which route is being diagnosed: ``bluez`` or ``serial``.
+    Checks belonging to the other route still run and are still printed — a
+    missing bridge is worth knowing about — but they are advisory, so they
+    cannot mask a fault on the route in use or hold back the live test.
+    """
     from anyctrl.backends.base import Console
 
     console = console or Console.SWITCH1
-    report = Report()
+    if path == "auto":
+        path = "bluez" if sys.platform == "linux" else "serial"
+    report = Report(path=path)
+    bluez_path = path == "bluez"
 
-    if not check_platform(report):
-        check_serial(report)  # the only route left on this machine
+    if not check_platform(report, advisory=not bluez_path):
+        check_serial(report, advisory=bluez_path)  # the only route left here
         return report
 
-    check_rfkill(report)
-    check_daemon(report)
-    check_hid_ports(report)
-    properties = check_dbus(report, adapter)
-    check_device_class(report, adapter, live=bool(live) and properties is not None)
-    check_serial(report)
+    if bluez_path:
+        check_rfkill(report)
+        check_daemon(report)
+        check_hid_ports(report)
+        properties = check_dbus(report, adapter)
+        check_device_class(report, adapter, live=bool(live) and properties is not None)
+    check_serial(report, advisory=bluez_path)
 
-    if live and not report.failures:
-        check_live_advertising(report, adapter, live, console)
-    elif live:
+    if not live:
+        return report
+    if not bluez_path:
+        report.add(
+            Check(
+                "live advertising",
+                True,
+                detail="only applies to the bluez route",
+                skipped=True,
+            )
+        )
+    elif report.failures:
         report.add(
             Check(
                 "live advertising",
@@ -493,4 +539,6 @@ def diagnose(*, adapter: str = "hci0", live: float = 0.0, console=None) -> Repor
                 skipped=True,
             )
         )
+    else:
+        check_live_advertising(report, adapter, live, console)
     return report

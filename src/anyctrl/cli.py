@@ -123,6 +123,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[console.value for console in Console],
         help="console generation, for --live timings",
     )
+    diagnose.add_argument(
+        "--path",
+        default="auto",
+        choices=["auto", "bluez", "serial"],
+        help="which route to diagnose; the other one's checks become advisory",
+    )
     diagnose.add_argument("--json", action="store_true", help="machine readable output")
     diagnose.set_defaults(handler=cmd_diagnose)
 
@@ -340,29 +346,35 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     from anyctrl.diagnostics import Code, diagnose
 
     live = parse_duration(args.live) if args.live else 0.0
-    if not args.json:
-        print(f"any-ctrl {__version__} diagnosis on {sys.platform}, adapter {args.adapter}")
-        if live:
-            print(f"live test: advertising for up to {live:g}s\n")
-        else:
-            print("static checks only; add --live to advertise and wait for a console\n")
-
-    report = diagnose(adapter=args.adapter, live=live, console=Console(args.console))
+    report = diagnose(
+        adapter=args.adapter, live=live, console=Console(args.console), path=args.path
+    )
 
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))
+        return 0 if report.code is Code.OK else 1
+
+    print(f"any-ctrl {__version__} diagnosis on {sys.platform}, adapter {args.adapter}")
+    print(f"route: {report.path}")
+    if live:
+        print(f"live test: advertising for up to {live:g}s\n")
     else:
-        for check in report.checks:
-            print(check)
-        print()
-        if report.code is Code.OK:
-            print(f"result {Code.OK.hex}: everything checked passed")
-        else:
-            worst = report.failures[0]
-            print(f"result {report.code.hex}: {worst.name} - {worst.detail}")
-            if len(report.failures) > 1:
-                others = ", ".join(check.code.hex for check in report.failures[1:])
-                print(f"also failing: {others}")
+        print("static checks only; add --live to advertise and wait for a console\n")
+
+    for check in report.checks:
+        print(check)
+    print()
+    if report.code is Code.OK:
+        print(f"result {Code.OK.hex}: everything on the {report.path} route passed")
+    else:
+        worst = report.failures[0]
+        print(f"result {report.code.hex}: {worst.name} - {worst.detail}")
+        if len(report.failures) > 1:
+            others = ", ".join(check.code.hex for check in report.failures[1:])
+            print(f"also failing: {others}")
+    if report.advisories:
+        noted = ", ".join(f"{check.code.hex} {check.name}" for check in report.advisories)
+        print(f"advisory (other route, not counted): {noted}")
     return 0 if report.code is Code.OK else 1
 
 

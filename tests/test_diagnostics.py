@@ -85,3 +85,67 @@ def test_diagnose_json_is_machine_readable(capsys):
     assert payload["code"].startswith("0x")
     assert payload["status"] in ("ok", "fail")
     assert all("code" in check for check in payload["checks"])
+
+
+def test_advisory_failures_do_not_become_the_result():
+    report = Report()
+    report.add(Check("bluetooth", True, detail="fine"))
+    report.add(Check("serial ports", False, Code.NO_BRIDGE_ADAPTER, "none", advisory=True))
+    assert report.failures == []
+    assert report.code is Code.OK
+    assert len(report.advisories) == 1
+
+
+def test_advisory_failures_still_appear_in_the_output():
+    rendered = str(Check("serial ports", False, Code.NO_BRIDGE_ADAPTER, "none", advisory=True))
+    assert "0x5003" in rendered
+    assert "not the route in use" in rendered
+
+
+def test_the_bluez_route_treats_bridge_problems_as_advisory():
+    # A Pi driving a console over Bluetooth has no bridge, and that must not
+    # be reported as the reason the console is not connecting.
+    report = diagnose(path="bluez")
+    serial_checks = [check for check in report.checks if "serial" in check.name]
+    assert serial_checks, "the bridge is still inspected"
+    assert all(check.ok or check.advisory for check in serial_checks)
+    assert all(check.code.value // 0x1000 != 5 for check in report.failures)
+
+
+def test_the_serial_route_treats_a_non_linux_platform_as_advisory():
+    report = diagnose(path="serial")
+    platform_checks = [check for check in report.checks if check.name == "platform"]
+    assert platform_checks
+    assert all(check.ok or check.advisory for check in platform_checks)
+
+
+def test_live_is_not_blocked_by_an_advisory_failure(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "anyctrl.diagnostics.check_live_advertising",
+        lambda report, adapter, seconds, console: calls.append(adapter),
+    )
+    # Force every real bluez check to pass so only the advisory one remains.
+    monkeypatch.setattr("anyctrl.diagnostics.check_platform", lambda report, advisory=False: True)
+    monkeypatch.setattr("anyctrl.diagnostics.check_rfkill", lambda report: None)
+    monkeypatch.setattr("anyctrl.diagnostics.check_daemon", lambda report: None)
+    monkeypatch.setattr("anyctrl.diagnostics.check_hid_ports", lambda report: None)
+    monkeypatch.setattr("anyctrl.diagnostics.check_dbus", lambda report, adapter: object())
+    monkeypatch.setattr(
+        "anyctrl.diagnostics.check_device_class", lambda report, adapter, live: None
+    )
+
+    def failing_serial(report, advisory=False):
+        report.add(Check("serial ports", False, Code.NO_BRIDGE_ADAPTER, "none", advisory=advisory))
+
+    monkeypatch.setattr("anyctrl.diagnostics.check_serial", failing_serial)
+
+    report = diagnose(path="bluez", live=5.0)
+    assert calls == ["hci0"], "the live test must still run"
+    assert report.code is Code.OK
+
+
+def test_json_reports_the_route(capsys):
+    main(["diagnose", "--json", "--path", "serial"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["path"] == "serial"
