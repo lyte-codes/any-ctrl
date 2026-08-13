@@ -1,7 +1,35 @@
 # Troubleshooting
 
-Start with `anyctrl doctor`. It checks the things below and prints what is
-missing.
+Start with `anyctrl doctor` for "can this machine work at all". When it says
+yes and the console still does nothing, run the deep diagnosis:
+
+```bash
+sudo anyctrl diagnose             # every check, each failure with a hex code
+sudo anyctrl diagnose --live      # also advertise for 60s and see what connects
+sudo anyctrl diagnose --json      # machine readable
+```
+
+Each failure carries a stable code you can look up below. The exit status is 0
+when everything passed and 1 otherwise, and the last line repeats the first
+failure — checks run in dependency order, so that first code is the one to fix.
+
+| code | meaning | code | meaning |
+| ---- | ------- | ---- | ------- |
+| `0x1001` | not Linux | `0x3001` | bluetoothd not running |
+| `0x1002` | no L2CAP support in Python | `0x3002` | input plugin enabled |
+| `0x1003` | not running as root | `0x3003` | PSM 17 already in use |
+| `0x2001` | no Bluetooth adapter | `0x3004` | PSM 19 already in use |
+| `0x2002` | adapter powered off | `0x3005` | PSM bind denied (not root) |
+| `0x2003` | blocked by rfkill | `0x4001` | dbus-python missing |
+| `0x2004` | adapter not answering | `0x4002` | bluetoothd not on the bus |
+| `0x2005` | not discoverable | `0x4003` | SDP registration refused |
+| `0x2006` | not pairable | `0x5001` | pyserial missing |
+| `0x2101` | no hciconfig or btmgmt | `0x5002` | no serial ports |
+| `0x2102` | class of device write failed | `0x5003` | no bridge adapter found |
+| `0x2103` | class of device reverted | `0x6001` | no console connected |
+| `0x2104` | class of device unreadable | `0x6002` | handshake never completed |
+
+`anyctrl doctor` still covers the basics below.
 
 ## Nothing is available: "no usable backend found"
 

@@ -58,6 +58,28 @@ def read_report(sock: socket.socket, timeout: float = 2.0) -> bytes:
     return sock.recv(512)
 
 
+#: Offset of the subcommand byte within a 0x21 reply, counting the HID header.
+SUBCOMMAND_OFFSET = 15
+
+
+def contains_reply(buffer: bytes, subcommand: int) -> bool:
+    """Is a reply to ``subcommand`` anywhere in these bytes?
+
+    A socket pair is a byte stream, so several reports can arrive in one recv
+    when the reader falls behind - which happens under load. Scanning for the
+    reply rather than assuming it starts at offset zero keeps this test honest
+    about what it is checking.
+    """
+    for index in range(len(buffer) - SUBCOMMAND_OFFSET):
+        if (
+            buffer[index] == HID_DATA_INPUT
+            and buffer[index + 1] == 0x21
+            and buffer[index + SUBCOMMAND_OFFSET] == subcommand
+        ):
+            return True
+    return False
+
+
 def test_input_reports_carry_the_hid_data_header(backend, pair):
     console, controller = pair
     backend._interrupt = controller
@@ -95,10 +117,11 @@ def test_handshake_completes_when_the_console_assigns_a_player(backend, pair):
             (0x30, b"\x01"),
         ):
             console.sendall(subcommand(request, args))
-            deadline = time.monotonic() + 3.0
+            deadline = time.monotonic() + 5.0
+            received = bytearray()
             while time.monotonic() < deadline:
-                report = read_report(console)
-                if report[1] == 0x21 and report[15] == request:
+                received += read_report(console)
+                if contains_reply(received, request):
                     break
             else:  # pragma: no cover - only on a very slow machine
                 pytest.fail(f"no reply to subcommand 0x{request:02x}")

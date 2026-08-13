@@ -105,6 +105,27 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = subparsers.add_parser("doctor", help="diagnose this machine's setup")
     doctor.set_defaults(handler=cmd_doctor)
 
+    diagnose = subparsers.add_parser(
+        "diagnose", help="deep diagnosis: every check, each failure with a hex code"
+    )
+    diagnose.add_argument("--adapter", default="hci0", help="local adapter (default: hci0)")
+    diagnose.add_argument(
+        "--live",
+        nargs="?",
+        const="60s",
+        default=None,
+        help="also advertise as a controller for this long and see what connects "
+        "(default 60s when given without a value)",
+    )
+    diagnose.add_argument(
+        "--console",
+        default=Console.SWITCH1.value,
+        choices=[console.value for console in Console],
+        help="console generation, for --live timings",
+    )
+    diagnose.add_argument("--json", action="store_true", help="machine readable output")
+    diagnose.set_defaults(handler=cmd_diagnose)
+
     buttons = subparsers.add_parser("buttons", help="list the button names macros accept")
     buttons.set_defaults(handler=cmd_buttons)
 
@@ -311,6 +332,38 @@ def cmd_ports(args: argparse.Namespace) -> int:
     print("The host talks to the board through a USB-to-serial adapter (CH340, CP2102,")
     print("FTDI); the board's own USB port goes to the console. See firmware/README.md.")
     return 1
+
+
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    import json
+
+    from anyctrl.diagnostics import Code, diagnose
+
+    live = parse_duration(args.live) if args.live else 0.0
+    if not args.json:
+        print(f"any-ctrl {__version__} diagnosis on {sys.platform}, adapter {args.adapter}")
+        if live:
+            print(f"live test: advertising for up to {live:g}s\n")
+        else:
+            print("static checks only; add --live to advertise and wait for a console\n")
+
+    report = diagnose(adapter=args.adapter, live=live, console=Console(args.console))
+
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        for check in report.checks:
+            print(check)
+        print()
+        if report.code is Code.OK:
+            print(f"result {Code.OK.hex}: everything checked passed")
+        else:
+            worst = report.failures[0]
+            print(f"result {report.code.hex}: {worst.name} - {worst.detail}")
+            if len(report.failures) > 1:
+                others = ", ".join(check.code.hex for check in report.failures[1:])
+                print(f"also failing: {others}")
+    return 0 if report.code is Code.OK else 1
 
 
 def cmd_buttons(args: argparse.Namespace) -> int:
