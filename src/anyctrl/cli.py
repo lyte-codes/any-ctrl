@@ -342,6 +342,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         for tool in ("hciconfig", "btmgmt", "bluetoothctl"):
             path = shutil.which(tool)
             print(f"  {'ok ' if path else 'no '} {tool}: {path or 'not found'}")
+        from anyctrl.backends.bluez import probe_hid_psms
+
+        free, detail = probe_hid_psms()
+        if free:
+            print(f"  ok  {detail}")
+        else:
+            problems += 1
+            print(f"  no  {detail}")
+
         plugin_state = _bluetoothd_input_plugin_state()
         if plugin_state is None:
             problems += 1

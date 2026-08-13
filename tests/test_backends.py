@@ -228,3 +228,11 @@ def test_status_callbacks_reach_the_caller():
 
 def test_status_callback_is_optional():
     DryRunBackend()._status("nobody is listening")  # must not raise
+
+
+def test_psm_probe_reports_a_reason_when_it_cannot_bind():
+    from anyctrl.backends.bluez import probe_hid_psms
+
+    free, detail = probe_hid_psms()
+    assert isinstance(free, bool)
+    assert detail  # always says why, whichever way it goes

@@ -23,6 +23,7 @@ missing instead of failing deep inside the handshake.
 
 from __future__ import annotations
 
+import errno
 import os
 import platform
 import re
@@ -724,6 +725,38 @@ class BluezBackend(ControllerBackend):
     def _log(self, message: str) -> None:
         if self.verbose:
             print(f"[bluez] {message}", file=sys.stderr)
+
+
+def probe_hid_psms() -> tuple[bool, str]:
+    """Can we actually claim the HID ports? The decisive Linux check.
+
+    Everything else about the setup can look right while ``bluetoothd``'s input
+    plugin quietly holds PSM 17, and the only symptom is a console that never
+    sees a controller. Binding them is the one test that settles it.
+    """
+    if sys.platform != "linux":
+        return (False, f"not Linux ({platform.system()})")
+    for psm in (CONTROL_PSM, INTERRUPT_PSM):
+        try:
+            sock = _l2cap_socket()
+        except BackendUnavailable as exc:
+            return (False, str(exc))
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("00:00:00:00:00:00", psm))
+            sock.listen(1)
+        except PermissionError:
+            return (False, f"PSM {psm}: permission denied (run as root)")
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                return (
+                    False,
+                    f"PSM {psm}: already in use - bluetoothd's input plugin still holds it",
+                )
+            return (False, f"PSM {psm}: {exc}")
+        finally:
+            sock.close()
+    return (True, f"PSM {CONTROL_PSM} and {INTERRUPT_PSM} are free")
 
 
 def _readable(sock: socket.socket, timeout: float) -> bool:
