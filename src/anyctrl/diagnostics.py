@@ -23,6 +23,7 @@ from __future__ import annotations
 import errno
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -148,6 +149,8 @@ FAILURE_MARKERS = ("Authentication Complete", "Disconnect Complete", "Simple Pai
 #: How btmon renders the scan-enable command and the value we need from it.
 SCAN_ENABLE_MARKER = "Write Scan Enable"
 SCAN_BOTH_MARKER = "Inquiry Scan + Page Scan"
+#: btmon renders the class-of-device write as "Class: 0x002508".
+CLASS_WRITE_MARKER = "Write Class of Device"
 
 
 @dataclass
@@ -554,6 +557,19 @@ class _HciTrace:
         return contacted, seen
 
     @staticmethod
+    def advertised_class(trace: str) -> int | None:
+        """The last class of device actually written to the controller.
+
+        What ``hciconfig`` reports and what reached the radio can differ, and
+        the console filters inquiry results on the value that reached the
+        radio. ``None`` when the trace never writes one.
+        """
+        if CLASS_WRITE_MARKER not in trace:
+            return None
+        values = re.findall(r"Class:\s*(0x[0-9a-fA-F]{6})", trace)
+        return int(values[-1], 16) if values else None
+
+    @staticmethod
     def scanning_enabled(trace: str) -> bool | None:
         """Did the controller actually accept inquiry *and* page scan?
 
@@ -620,13 +636,29 @@ def check_live_advertising(report: Report, adapter: str, seconds: float, console
                     )
                 )
                 return
+            from anyctrl.backends.bluez import PRO_CONTROLLER_CLASS
+
+            advertised = _HciTrace.advertised_class(trace_text)
+            if advertised is not None and advertised != PRO_CONTROLLER_CLASS:
+                report.add(
+                    Check(
+                        "live advertising",
+                        False,
+                        Code.CLASS_REVERTED,
+                        f"the radio advertised class 0x{advertised:06x}, not "
+                        f"0x{PRO_CONTROLLER_CLASS:06x}; the console filters on this and will "
+                        f"ignore anything else (trace: {trace_path})",
+                    )
+                )
+                return
             report.add(
                 Check(
                     "live advertising",
                     False,
                     Code.NO_CONSOLE_CONNECTION,
                     f"advertised for {seconds:g}s"
-                    + (", scan enable confirmed on the radio" if scanning else "")
+                    + (", scan enable confirmed" if scanning else "")
+                    + (f", class 0x{advertised:06x} confirmed" if advertised else "")
                     + ", and nothing on the radio even tried"
                     + (f" (trace: {trace_path})" if trace_path else ""),
                 )

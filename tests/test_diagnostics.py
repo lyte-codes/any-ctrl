@@ -223,3 +223,27 @@ def test_scan_enable_is_read_from_the_trace():
     assert _HciTrace.scanning_enabled(both) is True
     assert _HciTrace.scanning_enabled(page_only) is False
     assert _HciTrace.scanning_enabled("nothing relevant here") is None
+
+
+def test_advertised_class_is_read_from_the_trace():
+    from anyctrl.diagnostics import _HciTrace
+
+    trace = (
+        "< HCI Command: Write Class of Device (0x03|0x0024) plen 3\n"
+        "        Class: 0x002508\n"
+        "          Major class: Peripheral (mouse, joystick, keyboards)\n"
+    )
+    assert _HciTrace.advertised_class(trace) == 0x002508
+    assert _HciTrace.advertised_class("no class written here") is None
+
+
+def test_advertised_class_takes_the_last_write():
+    from anyctrl.diagnostics import _HciTrace
+
+    # bluetoothd recomputing the class after ours is exactly the failure this
+    # is here to catch, so the final value is the one that matters.
+    trace = (
+        "< HCI Command: Write Class of Device (0x03|0x0024) plen 3\n        Class: 0x002508\n"
+        "< HCI Command: Write Class of Device (0x03|0x0024) plen 3\n        Class: 0x6c0000\n"
+    )
+    assert _HciTrace.advertised_class(trace) == 0x6C0000

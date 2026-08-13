@@ -391,9 +391,12 @@ class _PairingAgent:
                 text=True,
             )
             assert process.stdin is not None
-            process.stdin.write(
-                f"agent {self.CAPABILITY}\ndefault-agent\npairable on\ndiscoverable on\n"
-            )
+            # Register the agent and nothing else. Asking bluetoothctl to set
+            # discoverable or pairable here would change adapter properties
+            # that are already set over D-Bus, and every such change makes
+            # bluetoothd recompute the class of device - undoing the gamepad
+            # class we depend on being advertised.
+            process.stdin.write(f"agent {self.CAPABILITY}\ndefault-agent\n")
             process.stdin.flush()
         except OSError as exc:
             return f"could not start bluetoothctl ({exc}); relying on an existing agent"
@@ -598,6 +601,15 @@ class BluezBackend(ControllerBackend):
         scan_state = self._config.enable_scanning()
         agent_state = self._agent.start()
         self._status(f"scan state: {scan_state}; {agent_state}")
+
+        # Last word on the class of device. Enabling scanning and registering
+        # the agent both touch the adapter, and anything that touches it can
+        # make bluetoothd recompute the class from the services it thinks it
+        # offers. The console filters inquiry results on this value, so it has
+        # to be right at the moment we start waiting - not merely earlier.
+        final_class = self._config.enforce_device_class()
+        if final_class is not None:
+            self._status(f"device class at wait time: 0x{final_class:06x}")
         if "PSCAN" not in scan_state and scan_state != "unknown":
             self._status(
                 "warning: page scan is off, so the console can see us but cannot "
