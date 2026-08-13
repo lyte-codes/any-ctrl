@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import select
 import shutil
 import socket
@@ -58,6 +59,21 @@ HID_VIRTUAL_CABLE_UNPLUG = 0x15
 #: Class of device a Pro Controller reports: peripheral / gamepad.
 PRO_CONTROLLER_CLASS = 0x002508
 PRO_CONTROLLER_NAME = "Pro Controller"
+
+
+def split_device_class(device_class: int) -> tuple[int, int]:
+    """Split a class of device into the major and minor values ``btmgmt`` wants.
+
+    The 24 bit field packs the minor device class into bits 7:2 and the major
+    into bits 12:8, with the low two bits reserved for the format. ``btmgmt``
+    takes the two fields already unpacked, so the minor has to be shifted down
+    rather than masked out of the low byte: for 0x002508 that is major 5
+    (peripheral), minor 2 (gamepad) - not minor 8.
+    """
+    major = (device_class >> 8) & 0x1F
+    minor = (device_class >> 2) & 0x3F
+    return (major, minor)
+
 
 #: HID report descriptor advertised in the SDP record.
 #:
@@ -239,11 +255,38 @@ class _AdapterConfig:
             properties.Set("org.bluez.Adapter1", "DiscoverableTimeout", dbus.UInt32(0))
         except dbus.exceptions.DBusException as exc:
             raise BackendError(f"cannot configure {self.adapter}: {exc}") from exc
-        self._set_device_class()
         self._applied = True
 
-    def _set_device_class(self) -> None:
-        """Set the class of device; BlueZ exposes no D-Bus property for it."""
+    def enforce_device_class(self, attempts: int = 3) -> int | None:
+        """Set the class of device and confirm it stuck.
+
+        This has to happen *after* the HID profile is registered: registering a
+        profile makes ``bluetoothd`` recompute the adapter's class from the
+        services it offers, which overwrites whatever we set beforehand. The
+        console decides whether something is a controller largely from this
+        value, so a silently reverted class looks exactly like a console that
+        refuses to notice us.
+
+        Returns the class read back, or ``None`` when it cannot be read.
+        """
+        for attempt in range(attempts):
+            self._write_device_class()
+            current = self.read_device_class()
+            if current is None:
+                return None  # nothing to verify against; assume the write took
+            if current == PRO_CONTROLLER_CLASS:
+                return current
+            if attempt + 1 < attempts:
+                time.sleep(0.3)  # bluetoothd may still be settling
+        raise BackendError(
+            f"the Bluetooth device class keeps reverting (wanted "
+            f"0x{PRO_CONTROLLER_CLASS:06x}, got 0x{current:06x}). The console identifies a "
+            "controller by this value and will not show one otherwise. See "
+            "docs/troubleshooting.md."
+        )
+
+    def _write_device_class(self) -> None:
+        """Write the class of device; BlueZ exposes no D-Bus property for it."""
         hciconfig = shutil.which("hciconfig")
         if hciconfig:
             result = self._run([hciconfig, self.adapter, "class", f"0x{PRO_CONTROLLER_CLASS:06x}"])
@@ -251,16 +294,30 @@ class _AdapterConfig:
                 return
         btmgmt = shutil.which("btmgmt")
         if btmgmt:
-            index = self.adapter.removeprefix("hci")
-            major = (PRO_CONTROLLER_CLASS >> 8) & 0x1F
-            minor = PRO_CONTROLLER_CLASS & 0xFF
-            result = self._run([btmgmt, "--index", index, "class", str(major), str(minor)])
+            major, minor = split_device_class(PRO_CONTROLLER_CLASS)
+            result = self._run([btmgmt, "--index", self.adapter, "class", str(major), str(minor)])
             if result.returncode == 0:
                 return
         raise BackendError(
-            "cannot set the Bluetooth device class: install bluez-utils (hciconfig) or "
+            "cannot set the Bluetooth device class: install bluez (hciconfig) or "
             "bluez-tools (btmgmt). Without it the console will not offer to pair."
         )
+
+    def read_device_class(self) -> int | None:
+        """Read the adapter's current class of device, if any tool can tell us."""
+        hciconfig = shutil.which("hciconfig")
+        if hciconfig:
+            result = self._run([hciconfig, self.adapter, "class"])
+            found = re.search(r"Class:\s*(0x[0-9a-fA-F]+)", result.stdout)
+            if found:
+                return int(found.group(1), 16)
+        btmgmt = shutil.which("btmgmt")
+        if btmgmt:
+            result = self._run([btmgmt, "--index", self.adapter, "info"])
+            found = re.search(r"class\s+(0x[0-9a-fA-F]+)", result.stdout)
+            if found:
+                return int(found.group(1), 16)
+        return None
 
     def restore(self) -> None:
         if not self._applied:
@@ -386,8 +443,21 @@ class BluezBackend(ControllerBackend):
 
         self._config.apply()
         self._profile.register()
+        # After the profile, not before: registering it makes bluetoothd
+        # recompute the adapter's class and clobber ours.
+        device_class = self._config.enforce_device_class()
         address = self._config.address()
         self.protocol = ProControllerProtocol(address)
+        if device_class is None:
+            self._log(
+                "could not read back the device class; if the console never sees the "
+                "controller, check it with: hciconfig " + self.adapter + " class"
+            )
+        else:
+            self._log(
+                f"adapter {address} advertising as {self.controller_name} "
+                f"(class 0x{device_class:06x})"
+            )
 
         try:
             if self.reconnect_address:

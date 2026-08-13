@@ -24,7 +24,7 @@ from anyctrl.backends.serial_bridge import (
 )
 from anyctrl.controller.buttons import Button
 from anyctrl.controller.state import ControllerState
-from anyctrl.errors import BackendUnavailable
+from anyctrl.errors import BackendError, BackendUnavailable
 
 
 def test_registry_lookup():
@@ -165,3 +165,54 @@ def test_bluez_is_unavailable_off_linux():
     status = BluezBackend.status()
     assert not status.available
     assert "Linux only" in status.detail
+
+
+# -- class of device --------------------------------------------------------
+
+
+def test_device_class_splits_into_major_and_minor():
+    from anyctrl.backends.bluez import PRO_CONTROLLER_CLASS, split_device_class
+
+    # 0x002508: peripheral (major 5), gamepad (minor 2). Masking the low byte
+    # instead of shifting would give minor 8, which is a different device
+    # entirely and one the console does not treat as a controller.
+    assert split_device_class(PRO_CONTROLLER_CLASS) == (5, 2)
+
+
+def test_device_class_round_trips_through_the_split():
+    from anyctrl.backends.bluez import PRO_CONTROLLER_CLASS, split_device_class
+
+    major, minor = split_device_class(PRO_CONTROLLER_CLASS)
+    assert (major << 8) | (minor << 2) == PRO_CONTROLLER_CLASS & 0x1FFF
+
+
+def test_enforce_device_class_retries_then_gives_up(monkeypatch):
+    from anyctrl.backends.bluez import _AdapterConfig
+
+    config = _AdapterConfig("hci0")
+    writes: list[int] = []
+    monkeypatch.setattr(config, "_write_device_class", lambda: writes.append(1))
+    monkeypatch.setattr(config, "read_device_class", lambda: 0x000104)  # computer, not gamepad
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    with pytest.raises(BackendError, match="keeps reverting"):
+        config.enforce_device_class(attempts=3)
+    assert len(writes) == 3
+
+
+def test_enforce_device_class_accepts_a_matching_read_back(monkeypatch):
+    from anyctrl.backends.bluez import PRO_CONTROLLER_CLASS, _AdapterConfig
+
+    config = _AdapterConfig("hci0")
+    monkeypatch.setattr(config, "_write_device_class", lambda: None)
+    monkeypatch.setattr(config, "read_device_class", lambda: PRO_CONTROLLER_CLASS)
+    assert config.enforce_device_class() == PRO_CONTROLLER_CLASS
+
+
+def test_enforce_device_class_tolerates_an_unreadable_class(monkeypatch):
+    from anyctrl.backends.bluez import _AdapterConfig
+
+    config = _AdapterConfig("hci0")
+    monkeypatch.setattr(config, "_write_device_class", lambda: None)
+    monkeypatch.setattr(config, "read_device_class", lambda: None)
+    assert config.enforce_device_class() is None

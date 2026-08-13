@@ -31,6 +31,26 @@ adapter does not look like a controller.
 
 ## bluez: the console never finds the controller
 
+any-ctrl says it is waiting, the grip screen shows nothing. Work down this
+list; the first item accounts for most cases.
+
+**Check the device class actually took.** While any-ctrl is waiting, from
+another shell:
+
+```bash
+sudo hciconfig hci0 class      # want: Class: 0x002508
+sudo btmgmt --index hci0 info  # or here, if hciconfig is not installed
+```
+
+The console decides what is a controller mostly from this value. any-ctrl sets
+it after registering the HID profile — registering makes `bluetoothd` recompute
+the class and overwrite it — and verifies the result, so a mismatch is now
+reported rather than silently waited out. If it reads anything else, something
+on the system is rewriting it: a desktop Bluetooth applet, or `bluetoothd`
+restarting underneath you.
+
+Run with `--verbose` to see the class any-ctrl read back after setting it.
+
 - Are you on **Change Grip/Order**? The console only listens for new
   controllers on that screen.
 - Is the adapter free? Another connected device — or a paired phone reconnecting
