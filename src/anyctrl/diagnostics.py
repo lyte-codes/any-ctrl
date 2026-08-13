@@ -50,6 +50,8 @@ class Code(IntEnum):
     ADAPTER_UNREADABLE = 0x2004
     NOT_DISCOVERABLE = 0x2005
     NOT_PAIRABLE = 0x2006
+    PAGE_SCAN_DISABLED = 0x2007
+    NO_PAIRING_AGENT = 0x2008
     CLASS_TOOL_MISSING = 0x2101
     CLASS_WRITE_FAILED = 0x2102
     CLASS_REVERTED = 0x2103
@@ -93,6 +95,14 @@ REMEDIES: dict[Code, str] = {
     Code.ADAPTER_UNREADABLE: "the adapter is not answering over D-Bus; restart bluetooth.service",
     Code.NOT_DISCOVERABLE: "any-ctrl sets this while running; outside a run it is expected",
     Code.NOT_PAIRABLE: "any-ctrl sets this while running; outside a run it is expected",
+    Code.PAGE_SCAN_DISABLED: (
+        "page scan is off: the console can discover us but cannot connect. "
+        "any-ctrl enables it while running (hciconfig <adapter> piscan)"
+    ),
+    Code.NO_PAIRING_AGENT: (
+        "no pairing agent: BlueZ turns away pairing it cannot authorise. "
+        "any-ctrl registers one via bluetoothctl; install bluez if it is missing"
+    ),
     Code.CLASS_TOOL_MISSING: "install bluez (hciconfig) or bluez-tools (btmgmt)",
     Code.CLASS_WRITE_FAILED: "the class of device could not be written; check the tool's output",
     Code.CLASS_REVERTED: (
@@ -114,8 +124,10 @@ REMEDIES: dict[Code, str] = {
     Code.NO_SERIAL_PORTS: "connect the USB-to-serial adapter wired to the bridge board",
     Code.NO_BRIDGE_ADAPTER: "no recognised adapter; pass --port to name one yourself",
     Code.NO_CONSOLE_CONNECTION: (
-        "the adapter advertised correctly but no console connected. Confirm the console "
-        "is on Change Grip/Order, delete any stale pairing there, and move it closer"
+        "the adapter advertised correctly but no console connected. Confirm the console is on "
+        "Change Grip/Order, delete any stale pairing there (X, Disconnect), and move it closer. "
+        "To see whether the console is even trying, run 'sudo btmon' in another terminal during "
+        "the test: inquiry and connection attempts from it will show up there"
     ),
     Code.HANDSHAKE_INCOMPLETE: "the console connected but never finished setting us up",
 }
@@ -161,13 +173,12 @@ class Report:
     """The full set of results."""
 
     checks: list[Check] = field(default_factory=list)
+    #: Which route was diagnosed: "bluez" or "serial".
+    path: str = "bluez"
 
     def add(self, check: Check) -> Check:
         self.checks.append(check)
         return check
-
-    #: Which route was diagnosed: "bluez" or "serial".
-    path: str = "bluez"
 
     @property
     def failures(self) -> list[Check]:
@@ -400,6 +411,37 @@ def check_device_class(report: Report, adapter: str, *, live: bool) -> None:
         )
 
 
+def check_scan_and_agent(report: Report, adapter: str) -> None:
+    """Can we be connected to, and can a pairing be authorised?
+
+    These are the two ways an adapter can look perfectly configured and still
+    refuse every console: discoverable but not connectable, or connectable but
+    with no agent to approve the pairing.
+    """
+    from anyctrl.backends.bluez import _AdapterConfig
+
+    state = _AdapterConfig(adapter).read_scan_state()
+    if state is None:
+        report.add(
+            Check("scan state", True, detail="cannot read it without hciconfig", skipped=True)
+        )
+    elif "PSCAN" in state:
+        report.add(Check("scan state", True, detail=state))
+    else:
+        # Outside a run this is normal; any-ctrl turns page scan on while it
+        # advertises, so this is informational rather than a failure.
+        report.add(
+            Check("scan state", True, detail=f"{state} (any-ctrl enables PSCAN while running)")
+        )
+
+    if shutil.which("bluetoothctl"):
+        report.add(Check("pairing agent", True, detail="bluetoothctl available to register one"))
+    else:
+        report.add(
+            Check("pairing agent", False, Code.NO_PAIRING_AGENT, "bluetoothctl not installed")
+        )
+
+
 def check_serial(report: Report, *, advisory: bool = False) -> None:
     """The USB bridge side, which matters on macOS and as a fallback."""
     from anyctrl.backends.serial_bridge import list_ports
@@ -517,6 +559,7 @@ def diagnose(
         check_hid_ports(report)
         properties = check_dbus(report, adapter)
         check_device_class(report, adapter, live=bool(live) and properties is not None)
+        check_scan_and_agent(report, adapter)
     check_serial(report, advisory=bluez_path)
 
     if not live:

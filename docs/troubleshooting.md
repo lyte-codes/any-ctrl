@@ -24,8 +24,10 @@ failure — checks run in dependency order, so that first code is the one to fix
 | `0x2004` | adapter not answering | `0x4002` | bluetoothd not on the bus |
 | `0x2005` | not discoverable | `0x4003` | SDP registration refused |
 | `0x2006` | not pairable | `0x5001` | pyserial missing |
-| `0x2101` | no hciconfig or btmgmt | `0x5002` | no serial ports |
-| `0x2102` | class of device write failed | `0x5003` | no bridge adapter found |
+| `0x2007` | page scan off (not connectable) | `0x5002` | no serial ports |
+| `0x2008` | no pairing agent available | `0x5003` | no bridge adapter found |
+| `0x2101` | no hciconfig or btmgmt | | |
+| `0x2102` | class of device write failed | | |
 | `0x2103` | class of device reverted | `0x6001` | no console connected |
 | `0x2104` | class of device unreadable | `0x6002` | handshake never completed |
 
@@ -89,6 +91,36 @@ Run with `--verbose` to see the class any-ctrl read back after setting it.
 - If the console lists the controller but immediately drops it, delete the old
   pairing on the console (**Change Grip/Order → X, Disconnect**) and pair again:
   the console remembers a link key that no longer matches.
+
+## bluez: 0x6001 - we advertise correctly and nothing connects
+
+Every check passes, the adapter holds the gamepad class, both channels listen,
+and the console still ignores it. In order of likelihood:
+
+1. **A stale pairing on the console.** It remembers a link key for this adapter
+   that no longer matches, and silently declines. On the console:
+   **Change Grip/Order → X, Disconnect**, then try again.
+2. **The console is not actually scanning.** It only looks for new controllers
+   while the grip screen is open — and it stops looking after a while. Open it
+   fresh, then start the run.
+3. **Page scan or the pairing agent.** any-ctrl now enables page scan
+   (`piscan`) and registers a `NoInputNoOutput` agent for the duration of a
+   run; without either, a console can find the adapter but never complete a
+   connection. `--verbose` prints both states.
+
+To find out whether the console is even trying, watch the radio while the test
+runs:
+
+```bash
+sudo btmon                                   # in another terminal
+sudo anyctrl diagnose --live 3m
+```
+
+Inquiry scans and connection attempts from the console appear in `btmon` as
+they happen. Nothing there at all means the console is not reaching us, and no
+amount of adapter configuration will change that — look at the console's own
+state and at distance/interference. Attempts that appear and then fail put the
+fault back on this side, and the failure reason will be in that output.
 
 ## bluez: the handshake never completes
 

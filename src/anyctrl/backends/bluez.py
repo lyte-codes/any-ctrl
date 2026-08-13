@@ -304,6 +304,33 @@ class _AdapterConfig:
             "bluez-tools (btmgmt). Without it the console will not offer to pair."
         )
 
+    def enable_scanning(self) -> str:
+        """Turn on page *and* inquiry scan, and report what stuck.
+
+        Discoverable (inquiry scan) only lets the console *find* us. Page scan
+        is what lets it *connect*, and BlueZ does not reliably leave it on for
+        an adapter that has no reason to expect connections. Without it the
+        symptom is exactly this: we advertise correctly and nothing arrives.
+        """
+        hciconfig = shutil.which("hciconfig")
+        if hciconfig:
+            self._run([hciconfig, self.adapter, "piscan"])
+        else:
+            btmgmt = shutil.which("btmgmt")
+            if btmgmt:
+                self._run([btmgmt, "--index", self.adapter, "connectable", "on"])
+                self._run([btmgmt, "--index", self.adapter, "discoverable", "on"])
+        return self.read_scan_state() or "unknown"
+
+    def read_scan_state(self) -> str | None:
+        """Which scans are enabled: ``PSCAN``, ``ISCAN``, both or neither."""
+        hciconfig = shutil.which("hciconfig")
+        if not hciconfig:
+            return None
+        result = self._run([hciconfig, self.adapter])
+        flags = [flag for flag in ("PSCAN", "ISCAN") if flag in result.stdout]
+        return " ".join(flags) if flags else "neither PSCAN nor ISCAN"
+
     def read_device_class(self) -> int | None:
         """Read the adapter's current class of device, if any tool can tell us."""
         hciconfig = shutil.which("hciconfig")
@@ -333,6 +360,58 @@ class _AdapterConfig:
             properties.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(False))
         except Exception:  # pragma: no cover - best effort clean up
             pass
+
+
+class _PairingAgent:
+    """Keeps a pairing agent registered for as long as we advertise.
+
+    BlueZ refuses a pairing attempt when no agent is registered to authorise
+    it. A desktop session provides one; a headless machine — the usual place
+    to run this — does not, so an incoming console is turned away without any
+    error on our side. ``bluetoothctl`` registers one and holds it for as long
+    as the process lives, which avoids pulling a GLib main loop into any-ctrl
+    purely to answer four D-Bus methods.
+    """
+
+    CAPABILITY = "NoInputNoOutput"  # "just works" pairing: nothing to confirm
+
+    def __init__(self) -> None:
+        self._process: subprocess.Popen | None = None
+
+    def start(self) -> str:
+        bluetoothctl = shutil.which("bluetoothctl")
+        if not bluetoothctl:
+            return "bluetoothctl not found; relying on an agent already registered"
+        try:
+            process = subprocess.Popen(
+                [bluetoothctl],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            assert process.stdin is not None
+            process.stdin.write(
+                f"agent {self.CAPABILITY}\ndefault-agent\npairable on\ndiscoverable on\n"
+            )
+            process.stdin.flush()
+        except OSError as exc:
+            return f"could not start bluetoothctl ({exc}); relying on an existing agent"
+        self._process = process
+        return f"{self.CAPABILITY} pairing agent registered"
+
+    def stop(self) -> None:
+        if self._process is None:
+            return
+        process, self._process = self._process, None
+        try:
+            if process.stdin is not None:
+                process.stdin.write("quit\n")
+                process.stdin.flush()
+                process.stdin.close()
+            process.wait(timeout=2.0)
+        except Exception:  # pragma: no cover - best effort clean up
+            process.kill()
 
 
 class _SdpProfile:
@@ -403,6 +482,7 @@ class BluezBackend(ControllerBackend):
 
         self._config = _AdapterConfig(adapter, controller_name)
         self._profile = _SdpProfile(build_sdp_record(controller_name, report_descriptor))
+        self._agent = _PairingAgent()
         self._control: socket.socket | None = None
         self._interrupt: socket.socket | None = None
         self._listeners: list[socket.socket] = []
@@ -513,6 +593,16 @@ class BluezBackend(ControllerBackend):
                     "Run as root and start bluetoothd with the input plugin disabled "
                     "(see docs/troubleshooting.md)."
                 ) from exc
+
+        # Become connectable only once both channels are actually listening.
+        scan_state = self._config.enable_scanning()
+        agent_state = self._agent.start()
+        self._status(f"scan state: {scan_state}; {agent_state}")
+        if "PSCAN" not in scan_state and scan_state != "unknown":
+            self._status(
+                "warning: page scan is off, so the console can see us but cannot "
+                "connect - check for anything managing this adapter"
+            )
 
         # Only now is the machine genuinely ready to be found, so this is where
         # the user gets told to go to the grip screen.
@@ -718,6 +808,7 @@ class BluezBackend(ControllerBackend):
                     pass
         self._listeners = []
         self._interrupt = self._control = None
+        self._agent.stop()
         self._profile.unregister()
         self._config.restore()
         self._connected = False

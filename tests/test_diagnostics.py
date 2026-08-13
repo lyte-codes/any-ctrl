@@ -134,6 +134,7 @@ def test_live_is_not_blocked_by_an_advisory_failure(monkeypatch):
     monkeypatch.setattr(
         "anyctrl.diagnostics.check_device_class", lambda report, adapter, live: None
     )
+    monkeypatch.setattr("anyctrl.diagnostics.check_scan_and_agent", lambda report, adapter: None)
 
     def failing_serial(report, advisory=False):
         report.add(Check("serial ports", False, Code.NO_BRIDGE_ADAPTER, "none", advisory=advisory))
