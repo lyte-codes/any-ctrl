@@ -449,15 +449,12 @@ class BluezBackend(ControllerBackend):
         address = self._config.address()
         self.protocol = ProControllerProtocol(address)
         if device_class is None:
-            self._log(
-                "could not read back the device class; if the console never sees the "
-                "controller, check it with: hciconfig " + self.adapter + " class"
+            self._status(
+                f"adapter {address} configured; could not read the device class back "
+                f"(check it with: hciconfig {self.adapter} class)"
             )
         else:
-            self._log(
-                f"adapter {address} advertising as {self.controller_name} "
-                f"(class 0x{device_class:06x})"
-            )
+            self._status(f"adapter {address} configured, device class 0x{device_class:06x}")
 
         try:
             if self.reconnect_address:
@@ -516,8 +513,15 @@ class BluezBackend(ControllerBackend):
                     "(see docs/troubleshooting.md)."
                 ) from exc
 
-        self._log("waiting for the console: open Change Grip/Order and stay on that screen")
+        # Only now is the machine genuinely ready to be found, so this is where
+        # the user gets told to go to the grip screen.
+        self._status(
+            f"listening on PSM {CONTROL_PSM} and {INTERRUPT_PSM} as "
+            f"{self.controller_name!r} - on the console open System Settings > "
+            "Controllers > Change Grip/Order and stay on that screen"
+        )
         self._control = self._accept_one(control_listener, deadline, "control")
+        self._status("console found us, opening the interrupt channel")
         self._interrupt = self._accept_one(interrupt_listener, deadline, "interrupt")
         try:
             self.peer_address = self._control.getpeername()[0]
@@ -565,7 +569,10 @@ class BluezBackend(ControllerBackend):
             for reply in self._process_input(data):
                 self._send_report(reply)
             if self.protocol.ready:
-                self._log(f"handshake complete, player {self.protocol.player_number}")
+                self._status(
+                    f"handshake complete, assigned player {self.protocol.player_number}; "
+                    f"settling for {self.profile.settle:g}s"
+                )
                 return
         raise BackendError(
             "the console never finished setting the controller up "

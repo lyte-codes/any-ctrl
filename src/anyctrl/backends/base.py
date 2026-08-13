@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -73,6 +74,16 @@ class ControllerBackend(abc.ABC):
         self.console = console
         self.profile = ConsoleProfile.for_console(console)
         self._connected = False
+        #: Set by the caller to hear about milestones during a connection:
+        #: sockets listening, console attached, handshake finished. Progress a
+        #: user is waiting on should be reported when it happens, not guessed
+        #: at beforehand.
+        self.on_status: Callable[[str], None] | None = None
+
+    def _status(self, message: str) -> None:
+        """Report a connection milestone, if anyone is listening."""
+        if self.on_status is not None:
+            self.on_status(message)
 
     # -- lifecycle --------------------------------------------------------
     @abc.abstractmethod

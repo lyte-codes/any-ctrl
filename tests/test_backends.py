@@ -216,3 +216,15 @@ def test_enforce_device_class_tolerates_an_unreadable_class(monkeypatch):
     monkeypatch.setattr(config, "_write_device_class", lambda: None)
     monkeypatch.setattr(config, "read_device_class", lambda: None)
     assert config.enforce_device_class() is None
+
+
+def test_status_callbacks_reach_the_caller():
+    messages: list[str] = []
+    backend = DryRunBackend()
+    backend.on_status = messages.append
+    backend._status("listening")
+    assert messages == ["listening"]
+
+
+def test_status_callback_is_optional():
+    DryRunBackend()._status("nobody is listening")  # must not raise

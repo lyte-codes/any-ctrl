@@ -248,7 +248,9 @@ class SerialBridgeBackend(ControllerBackend):
         # Boards that reset on DTR need a moment before they listen.
         time.sleep(0.2)
         self._serial.reset_input_buffer()
+        self._status(f"opened {device} at {self.baud} baud, greeting the bridge")
         self._handshake(timeout if timeout is not None else self.handshake_timeout)
+        self._status(f"bridge answered: {self.banner or 'no banner'}")
         self._connected = True
 
     def _autodetect(self) -> str:

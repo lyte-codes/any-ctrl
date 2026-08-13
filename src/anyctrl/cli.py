@@ -175,6 +175,9 @@ def cmd_run(args: argparse.Namespace, macro: CompiledMacro | None = None) -> int
         print(f"macro: {macro.name} ({length}, {len(macro.ops)} ops)")
         print(f"backend: {backend.name}, console: {console}")
         _print_connect_hint(backend)
+        # Milestones are printed as they happen, so "waiting for the console"
+        # never appears before we are genuinely listening for one.
+        backend.on_status = lambda message: print(f"  {message}")
 
     cancel = threading.Event()
     listener = _make_listener(args, quiet=args.quiet)
@@ -424,17 +427,15 @@ def _make_listener(args: argparse.Namespace, *, quiet: bool):
 
 
 def _print_connect_hint(backend: ControllerBackend) -> None:
+    """Say what is about to happen. The backend reports what *has* happened."""
     if backend.name == "bluez":
         reconnecting = getattr(backend, "reconnect_address", None)
         if reconnecting:
-            print(f"reconnecting to {reconnecting}: wake the console and stay on HOME")
+            print(f"connecting to {reconnecting}: the console must be awake, on HOME")
         else:
-            print(
-                "on the console open System Settings > Controllers > Change Grip/Order "
-                "and leave it open"
-            )
+            print("setting the adapter up; it will say when the console can find it")
     elif backend.name == "serial":
-        print("plug the bridge board into the console's USB port (dock or handheld adapter)")
+        print("opening the bridge; the board should be plugged into the console")
 
 
 class _sigint_handler:
