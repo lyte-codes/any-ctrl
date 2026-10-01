@@ -235,16 +235,41 @@ def parse_button(name: str, *, line: int | None = None, source: str | None = Non
 def parse_combo(
     text: str, *, line: int | None = None, source: str | None = None
 ) -> frozenset[Button]:
-    """Resolve ``"A"`` or ``"ZL+ZR+A"`` into a set of buttons."""
-    parts = [part for part in text.split("+") if part.strip()]
-    # ``+`` is also the name of a button, so "+" and "A++" need care: a lone
-    # empty piece between two separators means the PLUS button was meant.
-    if text.strip() == "+":
-        return frozenset({Button.PLUS})
-    if not parts:
-        raise MacroError("empty button combination", source=source, line=line)
-    buttons = {parse_button(part, line=line, source=source) for part in parts}
-    return frozenset(buttons)
+    """Resolve ``"A"``, ``"ZL+ZR+A"`` or ``"A++"`` into a set of buttons.
+
+    ``+`` is both the separator and the name of a button. Where a button name
+    is expected, ``+`` is the PLUS button; right after a name it separates.
+    So ``"+"`` is PLUS, ``"A++"`` is A and PLUS, ``"+++"`` is PLUS twice over,
+    and ``"A+"`` or ``"+A"`` are errors rather than a silently dropped button.
+    """
+    names: list[str] = []
+    current = ""
+    expecting_name = True
+    for char in text:
+        if char.isspace():
+            continue
+        if char != "+":
+            if not expecting_name and not current:
+                raise MacroError(
+                    f"missing '+' between buttons in {text!r}", source=source, line=line
+                )
+            current += char
+            continue
+        if current:
+            names.append(current)
+            current = ""
+            expecting_name = True
+        elif expecting_name:
+            names.append("+")
+            expecting_name = False
+        else:
+            expecting_name = True
+    if current:
+        names.append(current)
+    elif expecting_name:
+        message = "empty button combination" if not names else f"dangling '+' in {text!r}"
+        raise MacroError(message, source=source, line=line)
+    return frozenset(parse_button(name, line=line, source=source) for name in names)
 
 
 def parse_stick(name: str, *, line: int | None = None, source: str | None = None) -> Stick:

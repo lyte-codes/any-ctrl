@@ -28,6 +28,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -146,6 +147,12 @@ CONTACT_MARKERS = ("Connect Request", "Connect Complete", "Link Key Request", "I
 #: Evidence that a connection that did start then failed.
 FAILURE_MARKERS = ("Authentication Complete", "Disconnect Complete", "Simple Pairing Complete")
 
+#: Backend errors raised after the console connected, during the handshake.
+HANDSHAKE_FAILURE_MARKERS = (
+    "never finished setting the controller up",
+    "during the handshake",
+)
+
 #: How btmon renders the scan-enable command and the value we need from it.
 SCAN_ENABLE_MARKER = "Write Scan Enable"
 SCAN_BOTH_MARKER = "Inquiry Scan + Page Scan"
@@ -259,12 +266,22 @@ def check_platform(report: Report, *, advisory: bool = False) -> bool:
     report.add(Check("platform", True, detail=f"Linux {platform.release()}"))
 
     if not hasattr(socket, "BTPROTO_L2CAP"):
-        report.add(Check("l2cap support", False, Code.NO_L2CAP_SUPPORT, "missing in this Python"))
+        report.add(
+            Check(
+                "l2cap support",
+                False,
+                Code.NO_L2CAP_SUPPORT,
+                "missing in this Python",
+                advisory=advisory,
+            )
+        )
         return False
     report.add(Check("l2cap support", True, detail="present"))
 
     if os.geteuid() != 0:
-        report.add(Check("privileges", False, Code.NOT_ROOT, "not running as root"))
+        report.add(
+            Check("privileges", False, Code.NOT_ROOT, "not running as root", advisory=advisory)
+        )
         return False
     report.add(Check("privileges", True, detail="running as root"))
     return True
@@ -387,7 +404,7 @@ def check_hid_ports(report: Report) -> None:
 
 def check_device_class(report: Report, adapter: str, *, live: bool) -> None:
     """Read the class of device, and in live mode try to set it and verify."""
-    from anyctrl.backends.bluez import PRO_CONTROLLER_CLASS, _AdapterConfig
+    from anyctrl.backends.bluez import PRO_CONTROLLER_CLASS, _AdapterConfig, device_class_matches
 
     if not (shutil.which("hciconfig") or shutil.which("btmgmt")):
         report.add(Check("class tooling", False, Code.CLASS_TOOL_MISSING, "no hciconfig or btmgmt"))
@@ -418,7 +435,9 @@ def check_device_class(report: Report, adapter: str, *, live: bool) -> None:
         return
     time.sleep(0.3)
     after = config.read_device_class()
-    if after == PRO_CONTROLLER_CLASS:
+    if after is None:
+        report.add(Check("class of device", False, Code.CLASS_UNREADABLE, "cannot read it back"))
+    elif device_class_matches(after, PRO_CONTROLLER_CLASS):
         report.add(Check("class of device", True, detail=f"set to 0x{after:06x} and held"))
     else:
         report.add(
@@ -510,28 +529,39 @@ class _HciTrace:
         self.path: Path | None = None
         self._process: subprocess.Popen | None = None
         self._handle = None
+        self._text: str | None = None
 
     def start(self) -> str | None:
         if not shutil.which("btmon"):
             return None
-        self.path = Path(f"/tmp/anyctrl-hci-{os.getpid()}.log")
         try:
-            self._handle = self.path.open("w")
+            # A fresh, unpredictable, owner-only file: this runs as root, and a
+            # fixed name in /tmp could be planted as a symlink to anything.
+            descriptor, name = tempfile.mkstemp(prefix="anyctrl-hci-", suffix=".log")
+            self.path = Path(name)
+            self._handle = os.fdopen(descriptor, "w")
             self._process = subprocess.Popen(
                 ["btmon"], stdout=self._handle, stderr=subprocess.DEVNULL, text=True
             )
         except OSError:
+            if self._handle is not None:
+                self._handle.close()
+                self._handle = None
             self.path = None
             return None
         return str(self.path)
 
     def stop(self) -> str:
+        """End the capture and return it. Safe to call more than once."""
+        if self._text is not None:
+            return self._text
         if self._process is not None:
             self._process.terminate()
             try:
                 self._process.wait(timeout=2.0)
             except subprocess.TimeoutExpired:  # pragma: no cover - best effort
                 self._process.kill()
+                self._process.wait()
             self._process = None
         if self._handle is not None:
             self._handle.close()
@@ -539,9 +569,10 @@ class _HciTrace:
         if self.path is None or not self.path.exists():
             return ""
         try:
-            return self.path.read_text(errors="replace")
+            self._text = self.path.read_text(errors="replace")
         except OSError:  # pragma: no cover - best effort
             return ""
+        return self._text
 
     @staticmethod
     def summarise(trace: str) -> tuple[bool, list[str]]:
@@ -564,9 +595,7 @@ class _HciTrace:
         the console filters inquiry results on the value that reached the
         radio. ``None`` when the trace never writes one.
         """
-        if CLASS_WRITE_MARKER not in trace:
-            return None
-        values = re.findall(r"Class:\s*(0x[0-9a-fA-F]{6})", trace)
+        values = _command_fields(trace, CLASS_WRITE_MARKER, r"Class:\s*(0x[0-9a-fA-F]{6})")
         return int(values[-1], 16) if values else None
 
     @staticmethod
@@ -577,9 +606,33 @@ class _HciTrace:
         The trace settles it: the HCI command and its value are right there.
         ``None`` when the trace never mentions scan enable at all.
         """
-        if SCAN_ENABLE_MARKER not in trace:
+        values = _command_fields(trace, SCAN_ENABLE_MARKER, r"Scan enable:\s*(.+)")
+        if not values:
             return None
-        return SCAN_BOTH_MARKER in trace
+        # The last write is what the radio is doing now; an earlier "both"
+        # proves nothing if something switched page scan off afterwards.
+        return SCAN_BOTH_MARKER in values[-1]
+
+
+def _command_fields(trace: str, marker: str, pattern: str) -> list[str]:
+    """One field from every HCI command named ``marker`` in a btmon trace.
+
+    Only the indented lines belonging to that command are searched, so the
+    same field in other packets - a class read back, or the class a remote
+    device reports in a Connect Request - is never mistaken for what we wrote.
+    """
+    values: list[str] = []
+    inside = False
+    for line in trace.splitlines():
+        if line[:1] in ("<", ">", "@", "="):
+            inside = marker in line
+            continue
+        if inside:
+            found = re.search(pattern, line)
+            if found:
+                values.append(found.group(1).strip())
+                inside = False
+    return values
 
 
 def check_live_advertising(report: Report, adapter: str, seconds: float, console) -> None:
@@ -589,7 +642,7 @@ def check_live_advertising(report: Report, adapter: str, seconds: float, console
     configured, SDP registered, both channels listening. If a console is on
     Change Grip/Order and still nothing arrives, the fault is past our side.
     """
-    from anyctrl.backends.bluez import BluezBackend
+    from anyctrl.backends.bluez import PRO_CONTROLLER_CLASS, BluezBackend, device_class_matches
     from anyctrl.errors import BackendError
 
     backend = BluezBackend(console=console, adapter=adapter)
@@ -636,10 +689,10 @@ def check_live_advertising(report: Report, adapter: str, seconds: float, console
                     )
                 )
                 return
-            from anyctrl.backends.bluez import PRO_CONTROLLER_CLASS
-
             advertised = _HciTrace.advertised_class(trace_text)
-            if advertised is not None and advertised != PRO_CONTROLLER_CLASS:
+            if advertised is not None and not device_class_matches(
+                advertised, PRO_CONTROLLER_CLASS
+            ):
                 report.add(
                     Check(
                         "live advertising",
@@ -663,9 +716,14 @@ def check_live_advertising(report: Report, adapter: str, seconds: float, console
                     + (f" (trace: {trace_path})" if trace_path else ""),
                 )
             )
-        elif "never finished setting the controller up" in message:
+        elif any(marker in message for marker in HANDSHAKE_FAILURE_MARKERS):
+            # The console did connect; it just never finished with us.
             report.add(Check("live advertising", False, Code.HANDSHAKE_INCOMPLETE, message))
-        elif "class" in message:
+        elif "install bluez" in message:
+            report.add(Check("live advertising", False, Code.CLASS_TOOL_MISSING, message))
+        elif "could not write the Bluetooth device class" in message:
+            report.add(Check("live advertising", False, Code.CLASS_WRITE_FAILED, message))
+        elif "keeps reverting" in message:
             report.add(Check("live advertising", False, Code.CLASS_REVERTED, message))
         elif "SDP" in message or "service record" in message:
             report.add(Check("live advertising", False, Code.SDP_REGISTER_FAILED, message))
@@ -673,19 +731,19 @@ def check_live_advertising(report: Report, adapter: str, seconds: float, console
             report.add(Check("live advertising", False, Code.NO_CONSOLE_CONNECTION, message))
         return
     except Exception as exc:  # pragma: no cover - unexpected, still worth coding
-        trace.stop()
         report.add(Check("live advertising", False, Code.SDP_REGISTER_FAILED, str(exc)))
         return
     finally:
         backend.close()
-    trace.stop()
+        # Also on Ctrl-C: btmon would otherwise outlive us, writing forever.
+        trace.stop()
 
     report.add(
         Check(
             "live advertising",
             True,
-            detail=f"console connected and completed the handshake as player "
-            f"{backend.protocol.player_number if backend.protocol else '?'}",
+            detail="console connected and completed the handshake, "
+            f"{backend.protocol.describe_player() if backend.protocol else 'player unknown'}",
         )
     )
 

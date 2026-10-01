@@ -29,6 +29,20 @@ STANDARD_REPORT_LENGTH = 49
 SIMPLE_REPORT_LENGTH = 12
 
 
+#: Solid LED patterns (low nibble of the lights mask) the console uses for each
+#: player. Players 5 to 8 reuse the four LEDs in non-cumulative patterns.
+PLAYER_LIGHT_PATTERNS: dict[int, int] = {
+    0b0001: 1,
+    0b0011: 2,
+    0b0111: 3,
+    0b1111: 4,
+    0b1001: 5,
+    0b1010: 6,
+    0b1011: 7,
+    0b0110: 8,
+}
+
+
 class InputReportMode(IntEnum):
     """Input report modes the console can select with subcommand ``0x03``."""
 
@@ -84,7 +98,8 @@ class ProControllerProtocol:
 
         self.state = ControllerState()
         self.report_mode: InputReportMode = InputReportMode.SIMPLE_HID
-        self.player_number: int | None = None
+        #: The raw LED mask from the last "set player lights" subcommand.
+        self.player_lights: int | None = None
         self.vibration_enabled = False
         self.imu_enabled = False
         self.last_rumble: bytes = b""
@@ -96,11 +111,29 @@ class ProControllerProtocol:
     def ready(self) -> bool:
         """True once the console has finished setting the controller up.
 
-        The console assigns a player LED as the last step of a normal
-        handshake, so waiting for both a full report mode and a player number
-        is a reliable "you may start pressing buttons now" signal.
+        The console sets the player LEDs as the last step of a normal
+        handshake, so waiting for both a full report mode and a lights command
+        is a reliable "you may start pressing buttons now" signal. The lights
+        may still be flashing: on Change Grip/Order they keep flashing until
+        the controller itself presses L+R, so a solid player number cannot be
+        a precondition for input.
         """
-        return self.report_mode is InputReportMode.STANDARD_FULL and self.player_number is not None
+        return self.report_mode is InputReportMode.STANDARD_FULL and self.player_lights is not None
+
+    @property
+    def player_number(self) -> int | None:
+        """The 1-based player the solid LEDs show, or ``None`` if there is none yet."""
+        if self.player_lights is None:
+            return None
+        return PLAYER_LIGHT_PATTERNS.get(self.player_lights & 0x0F)
+
+    def describe_player(self) -> str:
+        """``"player 2"``, or the raw lights while no player is assigned."""
+        if self.player_number is not None:
+            return f"player {self.player_number}"
+        if self.player_lights is None:
+            return "no player lights yet"
+        return f"lights 0x{self.player_lights:02x}, no player assigned yet"
 
     def set_state(self, state: ControllerState) -> None:
         """Adopt a snapshot of the controller state for subsequent reports."""
@@ -120,8 +153,11 @@ class ProControllerProtocol:
         return self._timer
 
     def _common_prefix(self, report_id: int) -> bytearray:
-        # Battery in the high nibble; low nibble bit 0 = USB powered, bits 1-2
-        # = connection type (3 = Pro Controller / charging grip).
+        # Battery in the high nibble. In the low nibble bit 0 means powered
+        # over USB and bits 1-2 are the connection info; the reverse
+        # engineering notes call 3 "Joy-Con" and 0 "Pro Controller", but
+        # working emulators send 3 for every controller type and consoles
+        # accept it.
         connection = (self.state.battery << 4) | 0x06
         payload = bytearray((report_id, self._next_timer(), connection))
         payload += self.state.button_bytes()
@@ -215,7 +251,7 @@ class ProControllerProtocol:
                 0x02,  # unknown, always 2 on retail hardware
             )
         )
-        data += self._mac[::-1]
+        data += self._mac  # big endian, unlike most Bluetooth fields
         data += bytes((0x01, 0x02))  # 0x01 unknown, 0x02 = colours live in SPI
         return [self.subcommand_reply(0x82, subcommand, bytes(data))]
 
@@ -253,11 +289,11 @@ class ProControllerProtocol:
 
     def _sub_set_player_lights(self, subcommand: int, args: bytes) -> list[bytes]:
         if args:
-            self.player_number = _player_from_light_mask(args[0])
+            self.player_lights = args[0]
         return [self.subcommand_reply(0x80, subcommand)]
 
     def _sub_get_player_lights(self, subcommand: int, args: bytes) -> list[bytes]:
-        mask = 0 if self.player_number is None else (1 << self.player_number) - 1
+        mask = self.player_lights or 0
         return [self.subcommand_reply(0xB0, subcommand, bytes((mask,)))]
 
     def _sub_enable_imu(self, subcommand: int, args: bytes) -> list[bytes]:
@@ -303,13 +339,3 @@ class ProControllerProtocol:
         0x48: _sub_enable_vibration,
         0x50: _sub_ack_only,  # get regulated voltage
     }
-
-
-def _player_from_light_mask(mask: int) -> int:
-    """Turn the player LED bit mask into a 1-based player number."""
-    lit = mask & 0x0F
-    if lit == 0:
-        # Only the flashing bits are set: the console is still assigning a slot.
-        flashing = (mask >> 4) & 0x0F
-        return max(1, flashing.bit_length())
-    return lit.bit_length()

@@ -41,6 +41,10 @@ static const uint8_t STICK_CENTER = 128;
  * goes quiet: a crashed host must never leave a button held down. */
 static const unsigned long REPORT_INTERVAL_MS = 10;
 static const unsigned long HOST_TIMEOUT_MS = 1000;
+/* A frame is a dozen bytes at 115200 baud, about a millisecond. A frame that
+ * stalls far longer than that was cut off (the host died mid-write), so the
+ * parser starts over instead of eating the next frame as its tail. */
+static const unsigned long FRAME_STALL_MS = 20;
 
 /* Standard wired Switch gamepad report descriptor: 16 buttons, one hat, four
  * 8 bit axes and a vendor byte. */
@@ -106,8 +110,18 @@ static void neutralReport() {
     gReport[7] = 0x00;          // vendor
 }
 
+/* The endpoint the core assigned to the HID interface. It is a protected
+ * member, but naming it through a derived class yields a member pointer that
+ * can be applied to the HID() singleton. */
+struct HidEndpoint : HID_ {
+    static uint8_t get() { return HID().*(&HidEndpoint::pluggedEndpoint); }
+};
+
 static void sendReport() {
-    HID().SendReport(0, gReport, REPORT_SIZE);
+    /* Not HID().SendReport(): that always sends the report ID byte first,
+     * even ID 0, and the descriptor above declares no report IDs. The console
+     * would read a leading 0x00 and every field one byte late. */
+    USB_Send(HidEndpoint::get() | TRANSFER_RELEASE, gReport, REPORT_SIZE);
     gLastReport = millis();
 }
 
@@ -166,6 +180,11 @@ static void feed(uint8_t byte) {
     static uint8_t index = 0;
     static uint8_t checksum = 0;
     static uint8_t payload[64];
+    static unsigned long lastByte = 0;
+
+    const unsigned long now = millis();
+    if (state != 0 && (now - lastByte) > FRAME_STALL_MS) state = 0;
+    lastByte = now;
 
     switch (state) {
         case 0:

@@ -172,8 +172,12 @@ class MacroPlayer:
     def _check_cancelled(self) -> None:
         if self.cancel.is_set():
             raise MacroAborted("playback cancelled")
-        if self.timeout is not None and self._virtual >= self.timeout:
-            raise MacroAborted(f"playback exceeded {self.timeout:g}s")
+        if self.timeout is not None:
+            # Wall time counts too: a stretch of ops that never waits does not
+            # advance the virtual clock.
+            elapsed = max(self._virtual, self._monotonic() - self._start)
+            if elapsed >= self.timeout:
+                raise MacroAborted(f"playback exceeded {self.timeout:g}s")
 
     def _notify(
         self, kind: str, *, message: str = "", state: ControllerState | None = None

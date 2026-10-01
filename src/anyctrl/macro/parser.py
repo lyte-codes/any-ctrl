@@ -19,7 +19,9 @@ the reference. A quick taste::
 
 from __future__ import annotations
 
+import math
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from anyctrl.controller.buttons import (
@@ -76,6 +78,8 @@ def parse_duration(token: str, *, line: int | None = None, source: str | None = 
         value = float(number)
     except ValueError:
         raise MacroError(f"invalid duration {token!r}", source=source, line=line) from None
+    if not math.isfinite(value):
+        raise MacroError(f"invalid duration {token!r}", source=source, line=line)
     if value < 0:
         raise MacroError(f"negative duration {token!r}", source=source, line=line)
     return value * scale
@@ -83,9 +87,12 @@ def parse_duration(token: str, *, line: int | None = None, source: str | None = 
 
 def _parse_float(token: str, *, line: int, source: str | None) -> float:
     try:
-        return float(token)
+        value = float(token)
     except ValueError:
         raise MacroError(f"expected a number, got {token!r}", source=source, line=line) from None
+    if not math.isfinite(value):
+        raise MacroError(f"expected a finite number, got {token!r}", source=source, line=line)
+    return value
 
 
 def _parse_int(token: str, *, line: int, source: str | None) -> int:
@@ -173,10 +180,20 @@ class _Parser:
         self.source = source
         self.base_dir = base_dir
         self.include_stack = include_stack
+        #: The resolved file being parsed, used to recognise a definition that
+        #: arrives twice through two includes of the same library.
+        self.origin = str(include_stack[-1]) if include_stack else None
         self.file = MacroFile(source=source)
         # A stack of statement lists: the last entry receives new statements.
         self._blocks: list[list[Statement]] = [self.file.statements]
         self._block_kinds: list[str] = ["top"]
+        self._block_lines: list[int] = [0]
+        #: A ``loop``/``def`` header whose ``{`` is expected on a later line:
+        #: ``(keyword, line, open_block)``.
+        self._pending_block: tuple[str, int, Callable[[], None]] | None = None
+        #: Metadata from includes, merged after this file's own so that the
+        #: including file always wins, wherever its ``meta`` lines sit.
+        self._included_meta: list[dict[str, str]] = []
 
     # -- helpers ----------------------------------------------------------
     def _error(self, message: str, line: int) -> MacroError:
@@ -185,17 +202,36 @@ class _Parser:
     def _emit(self, statement: Statement) -> None:
         self._blocks[-1].append(statement)
 
-    def _push(self, kind: str, body: list[Statement]) -> None:
+    def _push(self, kind: str, body: list[Statement], line: int) -> None:
         self._blocks.append(body)
         self._block_kinds.append(kind)
+        self._block_lines.append(line)
 
-    def _split_at_brace(self, tokens: list[str], line: int, keyword: str) -> tuple[list[str], int]:
-        """Split ``loop 3 { press A`` into its header and the index after ``{``."""
-        try:
-            index = tokens.index("{")
-        except ValueError:
-            raise self._error(f"{keyword} must be followed by '{{'", line) from None
+    @staticmethod
+    def _split_at_brace(tokens: list[str]) -> tuple[list[str], int | None]:
+        """Split ``loop 3 { press A`` into its header and the index after ``{``.
+
+        The index is ``None`` when the ``{`` is still to come on a later line.
+        """
+        if "{" not in tokens:
+            return tokens, None
+        index = tokens.index("{")
         return tokens[:index], index + 1
+
+    def _begin_block(
+        self,
+        keyword: str,
+        line: int,
+        args: list[str],
+        consumed: int | None,
+        open_block: Callable[[], None],
+    ) -> int:
+        """Open a block now, or once its ``{`` turns up on a following line."""
+        if consumed is None:
+            self._pending_block = (keyword, line, open_block)
+            return len(args)
+        open_block()
+        return consumed
 
     # -- entry point ------------------------------------------------------
     def parse(self, text: str) -> MacroFile:
@@ -207,12 +243,28 @@ class _Parser:
             if not marked:
                 continue
             self._parse_line([text for text, _ in marked], [q for _, q in marked], lineno)
+        if self._pending_block is not None:
+            keyword, opened_at, _ = self._pending_block
+            raise self._error(f"{keyword} must be followed by '{{'", opened_at)
         if len(self._blocks) > 1:
-            raise self._error(f"unclosed '{self._block_kinds[-1]}' block", 0)
+            raise self._error(f"unclosed '{self._block_kinds[-1]}' block", self._block_lines[-1])
+        for meta in self._included_meta:
+            for key, value in meta.items():
+                self.file.meta.setdefault(key, value)
         return self.file
 
     def _parse_line(self, tokens: list[str], quoted: list[bool], line: int) -> None:
         """Parse one logical line, which may open or close blocks part way."""
+        if self._pending_block is not None:
+            keyword, opened_at, open_block = self._pending_block
+            if tokens[0] != "{" or quoted[0]:
+                raise self._error(f"{keyword} must be followed by '{{'", opened_at)
+            self._pending_block = None
+            open_block()
+            if len(tokens) > 1:
+                self._parse_line(tokens[1:], quoted[1:], line)
+            return
+
         for index, (text, is_quoted) in enumerate(zip(tokens, quoted, strict=True)):
             if text != "}" or is_quoted:
                 continue
@@ -222,6 +274,7 @@ class _Parser:
                 raise self._error("unexpected '}'", line)
             self._blocks.pop()
             self._block_kinds.pop()
+            self._block_lines.pop()
             if tokens[index + 1 :]:
                 self._parse_line(tokens[index + 1 :], quoted[index + 1 :], line)
             return
@@ -252,12 +305,14 @@ class _Parser:
             options = ", ".join(sorted(SETTABLE_OPTIONS))
             raise self._error(f"unknown option {args[0]!r} (known: {options})", line)
         value = parse_duration(args[1], line=line, source=self.source)
+        if name == "tick" and value <= 0:
+            raise self._error("tick must be longer than zero", line)
         self._emit(SetOption(name=name, value=value, line=line, source=self.source))
 
     def _st_def(self, args: list[str], line: int) -> int:
         if self._block_kinds[-1] != "top":
             raise self._error("def blocks cannot be nested", line)
-        header, consumed = self._split_at_brace(args, line, "def")
+        header, consumed = self._split_at_brace(args)
         if len(header) != 1:
             raise self._error("def needs exactly one name", line)
         name = header[0]
@@ -265,11 +320,15 @@ class _Parser:
             raise self._error(f"block {name!r} is already defined", line)
         body: list[Statement] = []
         self.file.definitions[name] = body
-        self._push("def", body)
-        return consumed
+        self.file.definition_origins[name] = self.origin
+
+        def open_block() -> None:
+            self._push("def", body, line)
+
+        return self._begin_block("def", line, args, consumed, open_block)
 
     def _st_loop(self, args: list[str], line: int) -> int:
-        header, consumed = self._split_at_brace(args, line, "loop")
+        header, consumed = self._split_at_brace(args)
         if len(header) != 1:
             raise self._error("loop needs a count or 'forever'", line)
         if header[0].lower() in {"forever", "always", "infinite"}:
@@ -279,9 +338,12 @@ class _Parser:
             if count < 0:
                 raise self._error("loop count cannot be negative", line)
         loop = Loop(count=count, body=[], line=line, source=self.source)
-        self._emit(loop)
-        self._push("loop", loop.body)
-        return consumed
+
+        def open_block() -> None:
+            self._emit(loop)
+            self._push("loop", loop.body, line)
+
+        return self._begin_block("loop", line, args, consumed, open_block)
 
     def _st_call(self, args: list[str], line: int) -> None:
         if len(args) != 1:
@@ -421,11 +483,14 @@ class _Parser:
             raise self._error(f"included macro not found: {args[0]}", line)
         included = parse_macro_file(path, include_stack=(*self.include_stack, path))
         for name, body in included.definitions.items():
+            origin = included.definition_origins.get(name)
             if name in self.file.definitions:
+                if origin is not None and self.file.definition_origins.get(name) == origin:
+                    continue  # the same library reached twice, e.g. a diamond
                 raise self._error(f"block {name!r} is already defined", line)
             self.file.definitions[name] = body
-        for key, value in included.meta.items():
-            self.file.meta.setdefault(key, value)
+            self.file.definition_origins[name] = origin
+        self._included_meta.append(included.meta)
         self._blocks[-1].extend(included.statements)
 
     _KEYWORDS = {

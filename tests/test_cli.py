@@ -144,3 +144,52 @@ def test_quiet_run_prints_nothing_on_success(macro_file, capsys):
 )
 def test_bluetoothd_plugin_detection(arguments, expected):
     assert _input_plugin_disabled(arguments) is expected
+
+
+def test_a_zero_tick_is_refused_before_connecting(macro_file, capsys, monkeypatch):
+    from anyctrl.backends.dryrun import DryRunBackend
+
+    connects: list[bool] = []
+    monkeypatch.setattr(DryRunBackend, "connect", lambda self, timeout=None: connects.append(True))
+    assert main(["run", str(macro_file), "--backend", "dryrun", "--tick", "0"]) == 1
+    assert "longer than zero" in capsys.readouterr().err
+    assert not connects
+
+
+@pytest.mark.parametrize("speed", ["0", "-1", "nan", "inf"])
+def test_speed_must_be_a_positive_number(macro_file, speed):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["run", str(macro_file), "--backend", "dryrun", "--speed", speed])
+    assert exit_info.value.code == 2
+
+
+def test_run_closes_the_backend_when_connecting_fails(macro_file, capsys, monkeypatch):
+    from anyctrl.backends.dryrun import DryRunBackend
+    from anyctrl.errors import BackendError
+
+    closes: list[bool] = []
+
+    def refuse(self, timeout=None):
+        raise BackendError("the console said no")
+
+    monkeypatch.setattr(DryRunBackend, "connect", refuse)
+    monkeypatch.setattr(DryRunBackend, "close", lambda self: closes.append(True))
+    assert main(["run", str(macro_file), "--backend", "dryrun"]) == 1
+    assert closes
+
+
+def test_press_honours_gap_and_press_time(monkeypatch):
+    from anyctrl import cli
+    from anyctrl.macro.model import Sleep
+
+    seen: dict = {}
+
+    def capture(namespace, macro):
+        seen["ops"] = macro.ops
+        return 0
+
+    monkeypatch.setattr(cli, "_run_compiled", capture)
+    arguments = ["press", "A", "--repeat", "2", "--gap", "500ms", "--backend", "dryrun"]
+    assert main(arguments) == 0
+    sleeps = [op.seconds for op in seen["ops"] if isinstance(op, Sleep)]
+    assert sleeps == pytest.approx([0.1, 0.5, 0.1, 0.5])

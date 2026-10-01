@@ -228,3 +228,86 @@ def test_parse_macro_keeps_statement_order():
         "Wait",
         "Press",
     ]
+
+
+@pytest.mark.parametrize("text", ["nan", "inf", "infs", "-inf"])
+def test_parse_duration_rejects_non_finite_values(text):
+    with pytest.raises(MacroError):
+        parse_duration(text)
+
+
+@pytest.mark.parametrize("line", ["stick L nan 0", "stick L angle inf", "stick L up nan"])
+def test_stick_rejects_non_finite_numbers(line):
+    with pytest.raises(MacroError, match="finite"):
+        compile_text(line)
+
+
+def test_braces_may_sit_on_their_own_lines():
+    text = "def tap\n{\n  press A\n}\n\nloop 3\n\n{ call tap }\n"
+    macro = compile_text(text)
+    assert isinstance(macro.ops[0], Repeat)
+    assert macro.ops[0].count == 3
+
+
+def test_a_missing_brace_is_reported_at_its_header():
+    with pytest.raises(MacroError, match="line 2: loop must be followed by"):
+        compile_text("press A\nloop 3\npress B\n")
+    with pytest.raises(MacroError, match="line 1: def must be followed by"):
+        compile_text("def tap\n")
+
+
+def test_an_unclosed_block_is_reported_where_it_opened():
+    with pytest.raises(MacroError, match="line 2: unclosed 'loop' block"):
+        compile_text("press A\nloop 3 {\n  press B\n")
+
+
+def test_including_files_meta_wins_wherever_it_is_written(tmp_path):
+    (tmp_path / "lib.macro").write_text('meta name "Library"\nmeta author "lib"\n')
+    main = tmp_path / "main.macro"
+    main.write_text('include "lib.macro"\nmeta name "Main"\n')
+    parsed = parse_macro_file(main)
+    assert parsed.meta["name"] == "Main"
+    assert parsed.meta["author"] == "lib"  # gaps are still filled
+
+
+def test_a_library_reached_twice_is_merged_once(tmp_path):
+    (tmp_path / "lib.macro").write_text("def tap {\n press A\n}\n")
+    (tmp_path / "a.macro").write_text('include "lib.macro"\n')
+    (tmp_path / "b.macro").write_text('include "lib.macro"\n')
+    main = tmp_path / "main.macro"
+    main.write_text('include "a.macro"\ninclude "b.macro"\ncall tap\n')
+    assert compile_macro(parse_macro_file(main)).ops
+
+
+def test_different_blocks_with_one_name_still_collide(tmp_path):
+    (tmp_path / "a.macro").write_text("def tap {\n press A\n}\n")
+    (tmp_path / "b.macro").write_text("def tap {\n press B\n}\n")
+    main = tmp_path / "main.macro"
+    main.write_text('include "a.macro"\ninclude "b.macro"\n')
+    with pytest.raises(MacroError, match="already defined"):
+        parse_macro_file(main)
+
+
+def test_set_tick_must_be_positive():
+    with pytest.raises(MacroError, match="tick"):
+        compile_text("set tick 0")
+
+
+def test_set_inside_a_loop_that_never_runs_has_no_effect():
+    macro = compile_text("loop 0 {\n set press_time 1s\n set tick 5ms\n}\npress A\n")
+    assert macro.ops[1] == Sleep(DEFAULT_PRESS_TIME)
+    assert "tick" not in macro.meta
+
+
+def test_set_inside_a_loop_0_is_still_checked():
+    with pytest.raises(MacroError, match="unknown block"):
+        compile_text("loop 0 {\n call missing\n}\n")
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["hold A\n release A", 'log "hi"', "press A 0 every 0", "loop 3 {\n hold B\n}"],
+)
+def test_forever_loops_that_never_wait_are_rejected(body):
+    with pytest.raises(MacroError, match="loop forever"):
+        compile_text(f"loop forever {{\n {body}\n}}\n")

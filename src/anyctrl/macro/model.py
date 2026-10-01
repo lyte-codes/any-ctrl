@@ -102,6 +102,8 @@ class MacroFile:
 
     statements: list[Statement] = field(default_factory=list)
     definitions: dict[str, list[Statement]] = field(default_factory=dict)
+    #: The resolved file each definition was written in (``None`` for text).
+    definition_origins: dict[str, str | None] = field(default_factory=dict)
     meta: dict[str, str] = field(default_factory=dict)
     source: str | None = None
 
@@ -180,7 +182,7 @@ class CompiledMacro:
 
     def duration(self) -> float:
         """Total playback time in seconds; ``inf`` if the macro never ends."""
-        return _duration(self.ops)
+        return ops_duration(self.ops)
 
 
 def _contains_endless(ops: tuple[Op, ...] | list[Op]) -> bool:
@@ -191,7 +193,8 @@ def _contains_endless(ops: tuple[Op, ...] | list[Op]) -> bool:
     return False
 
 
-def _duration(ops: tuple[Op, ...] | list[Op]) -> float:
+def ops_duration(ops: tuple[Op, ...] | list[Op]) -> float:
+    """Playback time of ``ops`` in seconds; ``inf`` if they never end."""
     total = 0.0
     for op in ops:
         if isinstance(op, Sleep):
@@ -199,7 +202,7 @@ def _duration(ops: tuple[Op, ...] | list[Op]) -> float:
         elif isinstance(op, Repeat):
             if op.count is None:
                 return float("inf")
-            inner = _duration(op.body)
+            inner = ops_duration(op.body)
             if inner == float("inf"):
                 return inner
             total += inner * op.count

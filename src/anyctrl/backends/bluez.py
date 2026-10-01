@@ -62,18 +62,35 @@ PRO_CONTROLLER_CLASS = 0x002508
 PRO_CONTROLLER_NAME = "Pro Controller"
 
 
+#: The bits of a class of device that say what the device *is*: the major
+#: class (bits 12:8) and the minor class (bits 7:2). The rest are service
+#: class bits, which the kernel computes itself.
+DEVICE_CLASS_MASK = 0x1FFC
+
+
 def split_device_class(device_class: int) -> tuple[int, int]:
     """Split a class of device into the major and minor values ``btmgmt`` wants.
 
-    The 24 bit field packs the minor device class into bits 7:2 and the major
-    into bits 12:8, with the low two bits reserved for the format. ``btmgmt``
-    takes the two fields already unpacked, so the minor has to be shifted down
-    rather than masked out of the low byte: for 0x002508 that is major 5
-    (peripheral), minor 2 (gamepad) - not minor 8.
+    These are the raw bytes the kernel stores and writes back out: the major
+    is bits 12:8 shifted down, but the minor stays in place as the low byte
+    with its two format bits clear. The kernel rejects a minor with either of
+    those bits set, so for 0x002508 the values are major 5 (peripheral) and
+    minor 0x08 (gamepad) - not minor 2.
     """
     major = (device_class >> 8) & 0x1F
-    minor = (device_class >> 2) & 0x3F
+    minor = device_class & 0xFC
     return (major, minor)
+
+
+def device_class_matches(current: int, wanted: int) -> bool:
+    """Do two classes of device describe the same kind of device?
+
+    Only the major and minor classes are compared. Bit 13 of 0x002508
+    (limited discoverable) is a service bit the kernel sets or clears on its
+    own, so a class written through ``btmgmt`` reads back as 0x000508 and
+    must still count as a gamepad.
+    """
+    return (current & DEVICE_CLASS_MASK) == (wanted & DEVICE_CLASS_MASK)
 
 
 #: HID report descriptor advertised in the SDP record.
@@ -275,7 +292,7 @@ class _AdapterConfig:
             current = self.read_device_class()
             if current is None:
                 return None  # nothing to verify against; assume the write took
-            if current == PRO_CONTROLLER_CLASS:
+            if device_class_matches(current, PRO_CONTROLLER_CLASS):
                 return current
             if attempt + 1 < attempts:
                 time.sleep(0.3)  # bluetoothd may still be settling
@@ -288,17 +305,24 @@ class _AdapterConfig:
 
     def _write_device_class(self) -> None:
         """Write the class of device; BlueZ exposes no D-Bus property for it."""
+        failures: list[str] = []
         hciconfig = shutil.which("hciconfig")
         if hciconfig:
             result = self._run([hciconfig, self.adapter, "class", f"0x{PRO_CONTROLLER_CLASS:06x}"])
             if result.returncode == 0:
                 return
+            failures.append(f"hciconfig: {_tool_output(result)}")
         btmgmt = shutil.which("btmgmt")
         if btmgmt:
             major, minor = split_device_class(PRO_CONTROLLER_CLASS)
             result = self._run([btmgmt, "--index", self.adapter, "class", str(major), str(minor)])
             if result.returncode == 0:
                 return
+            failures.append(f"btmgmt: {_tool_output(result)}")
+        if failures:
+            raise BackendError(
+                "could not write the Bluetooth device class (" + "; ".join(failures) + ")"
+            )
         raise BackendError(
             "cannot set the Bluetooth device class: install bluez (hciconfig) or "
             "bluez-tools (btmgmt). Without it the console will not offer to pair."
@@ -360,6 +384,12 @@ class _AdapterConfig:
             properties.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(False))
         except Exception:  # pragma: no cover - best effort clean up
             pass
+
+
+def _tool_output(result: subprocess.CompletedProcess) -> str:
+    """The most useful line a failed command printed."""
+    text = (result.stderr or result.stdout or "").strip()
+    return text.splitlines()[-1] if text else f"exit status {result.returncode}"
 
 
 class _PairingAgent:
@@ -525,35 +555,38 @@ class BluezBackend(ControllerBackend):
             timeout if timeout is not None else self.profile.pair_timeout
         )
 
-        self._config.apply()
-        self._profile.register()
-        # After the profile, not before: registering it makes bluetoothd
-        # recompute the adapter's class and clobber ours.
-        device_class = self._config.enforce_device_class()
-        address = self._config.address()
-        self.protocol = ProControllerProtocol(address)
-        if device_class is None:
-            self._status(
-                f"adapter {address} configured; could not read the device class back "
-                f"(check it with: hciconfig {self.adapter} class)"
-            )
-        else:
-            self._status(f"adapter {address} configured, device class 0x{device_class:06x}")
-
+        # Everything from the first adapter change on is undone by close() if
+        # any step fails - including Ctrl-C - so a failed run never leaves the
+        # adapter renamed and discoverable with no timeout.
         try:
+            self._config.apply()
+            self._profile.register()
+            # After the profile, not before: registering it makes bluetoothd
+            # recompute the adapter's class and clobber ours.
+            device_class = self._config.enforce_device_class()
+            address = self._config.address()
+            self.protocol = ProControllerProtocol(address)
+            if device_class is None:
+                self._status(
+                    f"adapter {address} configured; could not read the device class back "
+                    f"(check it with: hciconfig {self.adapter} class)"
+                )
+            else:
+                self._status(f"adapter {address} configured, device class 0x{device_class:06x}")
+
             if self.reconnect_address:
                 self._connect_out(self.reconnect_address, deadline)
             else:
                 self._accept_in(address, deadline)
             self._handshake(deadline)
+
+            self._connected = True
+            self._start_threads()
+            # Give the console the quiet moment it expects before real input.
+            time.sleep(self.profile.settle)
         except BaseException:
             self.close()
             raise
-
-        self._connected = True
-        self._start_threads()
-        # Give the console the quiet moment it expects before real input.
-        time.sleep(self.profile.settle)
 
     def _require_linux(self) -> None:
         status = self.status()
@@ -638,7 +671,7 @@ class BluezBackend(ControllerBackend):
     def _accept_one(self, listener: socket.socket, deadline: float, label: str) -> socket.socket:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise BackendError(f"timed out waiting for the {label} channel")
+            raise BackendError(f"timed out waiting for the console on the {label} channel")
         listener.settimeout(remaining)
         try:
             sock, _ = listener.accept()
@@ -673,7 +706,7 @@ class BluezBackend(ControllerBackend):
                 self._send_report(reply)
             if self.protocol.ready:
                 self._status(
-                    f"handshake complete, assigned player {self.protocol.player_number}; "
+                    f"handshake complete, {self.protocol.describe_player()}; "
                     f"settling for {self.profile.settle:g}s"
                 )
                 return

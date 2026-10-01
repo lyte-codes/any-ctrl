@@ -247,3 +247,121 @@ def test_advertised_class_takes_the_last_write():
         "< HCI Command: Write Class of Device (0x03|0x0024) plen 3\n        Class: 0x6c0000\n"
     )
     assert _HciTrace.advertised_class(trace) == 0x6C0000
+
+
+def test_the_serial_route_does_not_need_root(monkeypatch):
+    import sys
+
+    import pytest
+
+    if sys.platform != "linux":
+        pytest.skip("the root check only runs on Linux")
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        "anyctrl.diagnostics.check_serial",
+        lambda report, advisory=False: report.add(Check("serial ports", True, detail="found")),
+    )
+    report = diagnose(path="serial")
+    assert report.code is Code.OK
+    assert any(check.code is Code.NOT_ROOT and check.advisory for check in report.checks)
+
+
+def test_advertised_class_ignores_classes_in_other_packets():
+    from anyctrl.diagnostics import _HciTrace
+
+    # A Connect Request carries the *console's* class; a read reply carries
+    # whatever the adapter had. Neither is a class we wrote.
+    trace = (
+        "< HCI Command: Write Class of Device (0x03|0x0024) plen 3\n        Class: 0x002508\n"
+        "> HCI Event: Connect Request (0x04) plen 10\n        Class: 0x6c0110\n"
+        "> HCI Event: Command Complete (0x0e) plen 7\n"
+        "      Read Class of Device (0x03|0x0023) ncmd 1\n        Class: 0x000104\n"
+    )
+    assert _HciTrace.advertised_class(trace) == 0x002508
+
+
+def test_scan_enable_takes_the_last_write():
+    from anyctrl.diagnostics import _HciTrace
+
+    command = "< HCI Command: Write Scan Enable (0x03|0x001a) plen 1\n"
+    trace = (
+        command
+        + "        Scan enable: Inquiry Scan + Page Scan (0x03)\n"
+        + command
+        + "        Scan enable: Inquiry Scan (0x01)\n"
+    )
+    assert _HciTrace.scanning_enabled(trace) is False
+
+
+def test_trace_file_is_private_and_unpredictable(monkeypatch, tmp_path):
+    import os
+    import stat
+
+    from anyctrl.diagnostics import _HciTrace
+
+    class FakeProcess:
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/btmon")
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: FakeProcess())
+    trace = _HciTrace()
+    path = trace.start()
+    assert path is not None and path != f"/tmp/anyctrl-hci-{os.getpid()}.log"
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    assert trace.stop() == trace.stop() == ""
+
+
+def _fake_live_backend(monkeypatch, failure):
+    from anyctrl.backends.bluez import BluezBackend
+
+    def connect(self, timeout=None):
+        raise failure
+
+    monkeypatch.setattr(BluezBackend, "connect", connect)
+    monkeypatch.setattr(BluezBackend, "close", lambda self: None)
+
+
+def test_ctrl_c_during_the_live_test_stops_the_capture(monkeypatch):
+    import pytest
+
+    from anyctrl.diagnostics import _HciTrace, check_live_advertising
+
+    stopped: list[bool] = []
+    monkeypatch.setattr(_HciTrace, "start", lambda self: None)
+    monkeypatch.setattr(_HciTrace, "stop", lambda self: stopped.append(True) or "")
+    _fake_live_backend(monkeypatch, KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        check_live_advertising(Report(), "hci0", 1.0, None)
+    assert stopped, "btmon must not outlive the test"
+
+
+def test_a_console_lost_mid_handshake_is_coded_as_a_handshake_failure(monkeypatch):
+    from anyctrl.diagnostics import _HciTrace, check_live_advertising
+    from anyctrl.errors import BackendError
+
+    monkeypatch.setattr(_HciTrace, "start", lambda self: None)
+    _fake_live_backend(
+        monkeypatch, BackendError("the console closed the connection during the handshake")
+    )
+    report = Report()
+    check_live_advertising(report, "hci0", 1.0, None)
+    assert report.code is Code.HANDSHAKE_INCOMPLETE
+
+
+def test_missing_class_tools_are_coded_as_missing_tools(monkeypatch):
+    from anyctrl.diagnostics import _HciTrace, check_live_advertising
+    from anyctrl.errors import BackendError
+
+    monkeypatch.setattr(_HciTrace, "start", lambda self: None)
+    _fake_live_backend(
+        monkeypatch,
+        BackendError("cannot set the Bluetooth device class: install bluez (hciconfig) or ..."),
+    )
+    report = Report()
+    check_live_advertising(report, "hci0", 1.0, None)
+    assert report.code is Code.CLASS_TOOL_MISSING

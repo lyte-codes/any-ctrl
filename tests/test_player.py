@@ -172,3 +172,23 @@ def test_invalid_player_settings_are_rejected():
         MacroPlayer(backend, tick=0)
     with pytest.raises(ValueError):
         MacroPlayer(backend, speed=0)
+
+
+class RunningClock(FakeClock):
+    """A clock that also moves on its own, like real time under busy code."""
+
+    def __call__(self) -> float:
+        self.now += 0.001
+        return self.now
+
+
+def test_timeout_also_counts_wall_time():
+    # A long stretch that never waits does not advance virtual time, so the
+    # timeout has to notice the real clock instead.
+    backend = DryRunBackend(keep_frames=False)
+    backend.connect()
+    clock = RunningClock()
+    player = MacroPlayer(backend, sleeper=clock.sleep, monotonic=clock, timeout=0.05)
+    macro = compile_text("loop 1000000 {\n hold A\n release A\n}\n")
+    with pytest.raises(MacroAborted, match="exceeded"):
+        player.play(macro)

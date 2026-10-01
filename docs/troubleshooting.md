@@ -73,6 +73,10 @@ sudo hciconfig hci0 class      # want: Class: 0x002508
 sudo btmgmt --index hci0 info  # or here, if hciconfig is not installed
 ```
 
+What matters is the device part, `0x0508` (peripheral, gamepad). The `0x2000`
+bit on top is a service bit the kernel manages itself: when only `btmgmt` is
+available the class reads back as `0x000508`, and any-ctrl accepts that.
+
 The console decides what is a controller mostly from this value. any-ctrl sets
 it after registering the HID profile — registering makes `bluetoothd` recompute
 the class and overwrite it — and verifies the result, so a mismatch is now

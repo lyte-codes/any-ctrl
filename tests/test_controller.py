@@ -108,3 +108,16 @@ def test_copy_is_independent():
     clone = state.copy()
     clone.press(Button.B)
     assert state.buttons == {Button.A}
+
+
+def test_parse_combo_reads_plus_as_a_button_where_a_name_is_expected():
+    assert parse_combo("A++") == frozenset({Button.A, Button.PLUS})
+    assert parse_combo("+++") == frozenset({Button.PLUS})
+    assert parse_combo("ZL+-") == frozenset({Button.ZL, Button.MINUS})
+    assert parse_combo("A+++B") == frozenset({Button.A, Button.PLUS, Button.B})
+
+
+@pytest.mark.parametrize("text", ["A+", "+A", "++", "", "A++B"])
+def test_parse_combo_rejects_dangling_separators(text):
+    with pytest.raises(MacroError):
+        parse_combo(text)

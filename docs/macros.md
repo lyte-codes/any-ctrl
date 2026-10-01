@@ -108,8 +108,17 @@ loop forever {
 ```
 
 Loops are not unrolled, so `loop 100000 { ... }` costs nothing extra, and
-`forever` runs until you stop it with Ctrl-C or `--timeout`. `repeat` is an
-alias. Braces may sit on their own lines or share a line: `loop 3 { press A }`.
+`forever` runs until you stop it with Ctrl-C or `--timeout`. A `forever` body
+has to take time - a `wait`, or a `press` with a hold or gap - otherwise it
+would spin as fast as the machine allows, so one that never waits is rejected.
+`repeat` is an alias. Braces may sit on their own lines or share a line: `loop 3 { press A }`.
+
+```
+loop 3
+{
+    press A
+}
+```
 
 ### `def <name> { ... }` and `call <name>`
 
@@ -122,6 +131,8 @@ inside loops, and may call other blocks. Recursion is rejected at compile time.
 Paste in another macro file, resolved relative to the file doing the
 including. Included definitions and metadata are merged; a definition that
 collides with an existing one is an error, and circular includes are rejected.
+Reaching the same library twice, say through two files that both include
+`lib/common.macro`, is fine: its definitions are merged once.
 
 ### `log "<message>"`
 
@@ -138,7 +149,8 @@ Change a default for the statements that follow:
 | `tick`       | interval between controller reports    | 15 ms   |
 
 `set` is applied at compile time, so it affects every statement written after
-it, including statements inside a loop that runs later.
+it, including statements inside a loop that runs later. A `set` inside
+`loop 0 { }` has no effect, since that loop never runs.
 
 ### `meta <key> <value>`
 
@@ -155,6 +167,11 @@ A B X Y L R ZL ZR PLUS MINUS HOME CAPTURE LSTICK RSTICK UP DOWN LEFT RIGHT
 Aliases: `+` `-` `start` `select` `l1` `r1` `l2` `r2` `l3` `r3` `lclick`
 `rclick` `screenshot` `cap` `dup` `ddown` `dleft` `dright`. Combine with `+`:
 `ZL+ZR`, `A+B`, `L+R+PLUS`. `anyctrl buttons` prints the list.
+
+Because `+` is also a button, it means PLUS wherever a button name is
+expected: `+` alone is PLUS and `A++` is A with PLUS. A combination that starts
+or ends with a lone separator, like `A+` or `+A`, is rejected rather than
+guessed at.
 
 ## Timing, and why it is exact
 

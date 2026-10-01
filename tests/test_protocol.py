@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from anyctrl.controller.buttons import Button
 from anyctrl.controller.protocol import (
     SIMPLE_REPORT_LENGTH,
@@ -57,12 +59,12 @@ def test_full_handshake_makes_the_controller_ready():
     assert len(protocol.input_report()) == STANDARD_REPORT_LENGTH
 
 
-def test_device_info_reports_the_address_in_reverse():
+def test_device_info_reports_the_address_big_endian():
     protocol = ProControllerProtocol(ADDRESS)
     reply = protocol.handle_output_report(output_report(0x02))[0]
     ack, subcommand = reply[13], reply[14]
     assert (ack, subcommand) == (0x82, 0x02)
-    assert reply[19:25] == bytes((0x66, 0x55, 0x44, 0x33, 0x22, 0x11))
+    assert reply[19:25] == bytes((0x11, 0x22, 0x33, 0x44, 0x55, 0x66))
 
 
 def test_spi_read_returns_stick_calibration_matching_our_range():
@@ -130,3 +132,38 @@ def test_spi_flash_defaults_to_erased_bytes():
     assert flash.read(0x8010, 4) == b"\xff\xff\xff\xff"  # no user calibration
     assert flash.read(0x6050, 3) == b"\x32\x32\x32"  # body colour
     assert flash.read(0x1FFFF, 4) == b"\xff" * 4  # past the end of the image
+
+
+@pytest.mark.parametrize(
+    ("mask", "player"),
+    [(0x01, 1), (0x03, 2), (0x07, 3), (0x0F, 4), (0x09, 5), (0x0A, 6), (0x0B, 7), (0x06, 8)],
+)
+def test_player_lights_map_to_all_eight_players(mask, player):
+    protocol = ProControllerProtocol(ADDRESS)
+    protocol.handle_output_report(output_report(0x30, bytes([mask])))
+    assert protocol.player_number == player
+    reply = protocol.handle_output_report(output_report(0x31))[0]
+    assert reply[15] == mask, "get player lights echoes exactly what was set"
+
+
+def test_flashing_lights_are_ready_but_assign_no_player():
+    # Change Grip/Order keeps the lights flashing until the controller presses
+    # L+R, so input has to be possible before a player is assigned.
+    protocol = ProControllerProtocol(ADDRESS)
+    protocol.handle_output_report(output_report(0x03, b"\x30"))
+    protocol.handle_output_report(output_report(0x30, b"\xf0"))
+    assert protocol.ready
+    assert protocol.player_number is None
+    assert "0xf0" in protocol.describe_player()
+
+
+def test_both_stick_parameter_blocks_match_a_retail_controller():
+    flash = SpiFlash()
+    first, second = flash.read(0x6086, 18), flash.read(0x6098, 18)
+    assert first == second
+
+    # Values 2 and 3 of the twelve 12 bit values: dead zone and range ratio.
+    dead_zone = second[3] | ((second[4] & 0x0F) << 8)
+    range_ratio = (second[4] >> 4) | (second[5] << 4)
+    assert dead_zone > 0
+    assert range_ratio > 0

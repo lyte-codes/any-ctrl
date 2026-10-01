@@ -173,17 +173,78 @@ def test_bluez_is_unavailable_off_linux():
 def test_device_class_splits_into_major_and_minor():
     from anyctrl.backends.bluez import PRO_CONTROLLER_CLASS, split_device_class
 
-    # 0x002508: peripheral (major 5), gamepad (minor 2). Masking the low byte
-    # instead of shifting would give minor 8, which is a different device
-    # entirely and one the console does not treat as a controller.
-    assert split_device_class(PRO_CONTROLLER_CLASS) == (5, 2)
+    # 0x002508: peripheral (major 5), gamepad (minor 0x08). The kernel keeps
+    # the minor as the raw low byte and rejects one with either of its two
+    # low format bits set, so shifting it down to 2 would be refused.
+    major, minor = split_device_class(PRO_CONTROLLER_CLASS)
+    assert (major, minor) == (5, 0x08)
+    assert minor & 0x03 == 0
+    assert major & 0xE0 == 0
 
 
 def test_device_class_round_trips_through_the_split():
     from anyctrl.backends.bluez import PRO_CONTROLLER_CLASS, split_device_class
 
+    # The kernel writes the class out as (minor, major, service classes).
     major, minor = split_device_class(PRO_CONTROLLER_CLASS)
-    assert (major << 8) | (minor << 2) == PRO_CONTROLLER_CLASS & 0x1FFF
+    assert (major << 8) | minor == PRO_CONTROLLER_CLASS & 0x1FFF
+
+
+def test_device_class_comparison_ignores_service_bits():
+    from anyctrl.backends.bluez import PRO_CONTROLLER_CLASS, device_class_matches
+
+    assert device_class_matches(0x002508, PRO_CONTROLLER_CLASS)
+    assert device_class_matches(0x000508, PRO_CONTROLLER_CLASS)  # set through btmgmt
+    assert not device_class_matches(0x000104, PRO_CONTROLLER_CLASS)  # a computer
+    assert not device_class_matches(0x002504, PRO_CONTROLLER_CLASS)  # a joystick
+
+
+def test_enforce_device_class_accepts_the_class_btmgmt_produces(monkeypatch):
+    from anyctrl.backends.bluez import _AdapterConfig
+
+    config = _AdapterConfig("hci0")
+    monkeypatch.setattr(config, "_write_device_class", lambda: None)
+    monkeypatch.setattr(config, "read_device_class", lambda: 0x000508)
+    assert config.enforce_device_class() == 0x000508
+
+
+def test_class_write_failures_name_the_tool(monkeypatch):
+    import subprocess
+
+    from anyctrl.backends.bluez import _AdapterConfig
+
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    failed = subprocess.CompletedProcess([], 1, stdout="", stderr="Invalid Parameters")
+    monkeypatch.setattr(_AdapterConfig, "_run", staticmethod(lambda command: failed))
+    with pytest.raises(BackendError, match="could not write.*btmgmt: Invalid Parameters"):
+        _AdapterConfig("hci0")._write_device_class()
+
+
+def test_class_tools_missing_is_its_own_error(monkeypatch):
+    from anyctrl.backends.bluez import _AdapterConfig
+
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    with pytest.raises(BackendError, match="install bluez"):
+        _AdapterConfig("hci0")._write_device_class()
+
+
+def test_a_failed_connect_restores_the_adapter(monkeypatch):
+    from anyctrl.backends.bluez import BluezBackend
+
+    backend = BluezBackend()
+    restored: list[bool] = []
+    monkeypatch.setattr(backend, "_require_linux", lambda: None)
+    monkeypatch.setattr(backend._config, "apply", lambda: None)
+    monkeypatch.setattr(backend._config, "restore", lambda: restored.append(True))
+    monkeypatch.setattr(backend._profile, "register", lambda: None)
+
+    def reverting(attempts: int = 3):
+        raise BackendError("the Bluetooth device class keeps reverting")
+
+    monkeypatch.setattr(backend._config, "enforce_device_class", reverting)
+    with pytest.raises(BackendError, match="keeps reverting"):
+        backend.connect(timeout=1.0)
+    assert restored, "the adapter must not be left advertising as a controller"
 
 
 def test_enforce_device_class_retries_then_gives_up(monkeypatch):

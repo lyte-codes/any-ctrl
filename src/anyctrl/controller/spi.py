@@ -22,6 +22,7 @@ FLASH_SIZE = 0x20000
 ADDR_SERIAL = 0x6000
 ADDR_IMU_CALIBRATION = 0x6020
 ADDR_STICK_DEVICE_PARAMS = 0x6086
+ADDR_STICK_DEVICE_PARAMS_2 = 0x6098
 ADDR_FACTORY_STICK_CAL = 0x603D
 ADDR_COLORS = 0x6050
 ADDR_IMU_HORIZONTAL_OFFSETS = 0x6080
@@ -103,14 +104,16 @@ class SpiFlash:
         self._write(ADDR_COLORS, bytes((*body, *buttons, *left_grip, *right_grip)))
 
     def _write_stick_device_parameters(self) -> None:
-        """Dead zone and range ratio the console applies to our stick values."""
-        dead_zone = 160
-        range_ratio = 0xDAC
-        # The blob below is the stick device parameter set a retail Pro
-        # Controller reports; the console reads it verbatim.
+        """Dead zone and range ratio the console applies to our stick values.
+
+        There are two 18 byte parameter sets, one per stick. A retail Pro
+        Controller stores the same blob in both, and the console reads each
+        verbatim: twelve 12 bit values, with the dead zone and range ratio as
+        values 2 and 3.
+        """
         params = bytes.fromhex("0f30619630f3d41454411554c7799c333663")
         self._write(ADDR_STICK_DEVICE_PARAMS, params)
-        self._write(0x6098, _pack_12bit([dead_zone, range_ratio, 0, 0, 0, 0])[:6])
+        self._write(ADDR_STICK_DEVICE_PARAMS_2, params)
 
     # -- access ------------------------------------------------------------
     def read(self, address: int, length: int) -> bytes:

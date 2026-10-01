@@ -277,10 +277,18 @@ class SerialBridgeBackend(ControllerBackend):
             )
         return candidates[0].device
 
+    #: Resend HELLO this often while waiting for the banner. A board whose
+    #: parser was left mid-frame by a previous run swallows the first HELLO
+    #: as the tail of that frame; the next one then lands on a clean parser.
+    HELLO_INTERVAL = 0.2
+
     def _handshake(self, timeout: float) -> None:
-        self._write(encode_frame(MSG_HELLO))
         deadline = time.monotonic() + max(0.1, timeout)
+        next_hello = time.monotonic()
         while time.monotonic() < deadline:
+            if time.monotonic() >= next_hello:
+                self._write(encode_frame(MSG_HELLO))
+                next_hello = time.monotonic() + self.HELLO_INTERVAL
             for message_type, payload in self._poll():
                 if message_type == MSG_BANNER:
                     self.banner = payload.decode("ascii", "replace").strip()

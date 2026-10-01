@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from anyctrl.controller.buttons import Dpad
 from anyctrl.controller.state import StickState
@@ -29,6 +29,7 @@ from anyctrl.macro.model import (
     Statement,
     StickMove,
     Wait,
+    ops_duration,
 )
 
 #: How long ``press`` holds a button when the macro does not say.
@@ -144,9 +145,24 @@ class _Compiler:
         return ops
 
     def _compile_loop(self, statement: Loop, call_stack: tuple[str, ...]) -> list[Op]:
+        context, meta = replace(self.context), dict(self.meta)
         body = self.compile_block(statement.body, call_stack=call_stack)
-        if not body or statement.count == 0:
+        if statement.count == 0:
+            # Still compiled, so mistakes in it are reported, but a loop that
+            # never runs must not leave its ``set`` statements behind.
+            self.context = context
+            self.meta.clear()
+            self.meta.update(meta)
             return []
+        if not body:
+            return []
+        if statement.count is None and ops_duration(body) == 0:
+            raise MacroError(
+                "'loop forever' needs a wait or a timed press in its body; without one "
+                "it spins as fast as the machine allows and --timeout never fires",
+                source=statement.source,
+                line=statement.line,
+            )
         if statement.count == 1:
             return body
         return [Repeat(count=statement.count, body=tuple(body))]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 import signal
@@ -166,7 +167,9 @@ def _add_connection_options(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_timing_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--speed", type=float, default=1.0, help="playback speed multiplier")
+    parser.add_argument(
+        "--speed", type=_positive_float, default=1.0, help="playback speed multiplier"
+    )
     parser.add_argument(
         "--tick", default=None, help=f"report interval (default: {DEFAULT_TICK * 1000:g}ms)"
     )
@@ -207,39 +210,40 @@ def cmd_run(args: argparse.Namespace, macro: CompiledMacro | None = None) -> int
         backend.on_status = lambda message: print(f"  {message}")
 
     cancel = threading.Event()
-    listener = _make_listener(args, quiet=args.quiet)
-    exit_code = 0
+    # Built before connecting so that bad timing options fail straight away,
+    # not after the console has spent a minute pairing.
+    player = MacroPlayer(
+        backend,
+        tick=tick,
+        speed=args.speed,
+        listener=_make_listener(args, quiet=args.quiet),
+        cancel=cancel,
+        timeout=timeout,
+    )
     try:
-        backend.connect(timeout=connect_timeout)
-    except AnyCtrlError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    if not args.quiet:
-        print("connected. playing (Ctrl-C to stop)")
-
-    with _sigint_handler(cancel):
-        player = MacroPlayer(
-            backend,
-            tick=tick,
-            speed=args.speed,
-            listener=listener,
-            cancel=cancel,
-            timeout=timeout,
-        )
         try:
-            elapsed = player.play(macro, repeat=args.repeat)
-            if not args.quiet:
-                print(f"done after {elapsed:.1f}s of playback")
-        except MacroAborted as exc:
-            print(f"\nstopped: {exc}", file=sys.stderr)
-            exit_code = 130
+            backend.connect(timeout=connect_timeout)
         except AnyCtrlError as exc:
             print(f"error: {exc}", file=sys.stderr)
-            exit_code = 1
-        finally:
-            backend.close()
-    return exit_code
+            return 1
+
+        if not args.quiet:
+            print("connected. playing (Ctrl-C to stop)")
+
+        with _sigint_handler(cancel):
+            try:
+                elapsed = player.play(macro, repeat=args.repeat)
+                if not args.quiet:
+                    print(f"done after {elapsed:.1f}s of playback")
+            except MacroAborted as exc:
+                print(f"\nstopped: {exc}", file=sys.stderr)
+                return 130
+            except AnyCtrlError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+        return 0
+    finally:
+        backend.close()
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -298,7 +302,8 @@ def cmd_press(args: argparse.Namespace) -> int:
     combo = parse_combo(args.combo)
     names = "+".join(sorted(button.value for button in combo))
     text = f"press {names} {args.duration} x{args.repeat}\n"
-    macro = compile_text(text, source="<press>")
+    press_time, gap = _press_defaults(args)
+    macro = compile_text(text, source="<press>", press_time=press_time, gap=gap)
     namespace = argparse.Namespace(**vars(args))
     namespace.macro = None
     namespace.quiet = False
@@ -460,9 +465,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _load_macro(args: argparse.Namespace) -> CompiledMacro:
+def _press_defaults(args: argparse.Namespace) -> tuple[float | None, float | None]:
+    """``--press-time`` and ``--gap``, parsed; ``None`` where not given."""
     press_time = parse_duration(args.press_time) if args.press_time else None
     gap = parse_duration(args.gap) if args.gap else None
+    return press_time, gap
+
+
+def _load_macro(args: argparse.Namespace) -> CompiledMacro:
+    press_time, gap = _press_defaults(args)
     if args.macro == "-":
         text = sys.stdin.read()
         return compile_text(text, source="<stdin>", press_time=press_time, gap=gap)
@@ -474,10 +485,25 @@ def _load_macro(args: argparse.Namespace) -> CompiledMacro:
 
 def _tick_for(args: argparse.Namespace, macro: CompiledMacro) -> float:
     if getattr(args, "tick", None):
-        return parse_duration(args.tick)
-    if "tick" in macro.meta:
-        return parse_duration(macro.meta["tick"])
-    return DEFAULT_TICK
+        tick, origin = parse_duration(args.tick), "--tick"
+    elif "tick" in macro.meta:
+        tick, origin = parse_duration(macro.meta["tick"]), "the macro's tick"
+    else:
+        return DEFAULT_TICK
+    if tick <= 0:
+        raise MacroError(f"{origin} must be longer than zero")
+    return tick
+
+
+def _positive_float(text: str) -> float:
+    """argparse type for multipliers that must be finite and above zero."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive number, got {text!r}")
+    return value
 
 
 def _run_compiled(args: argparse.Namespace, macro: CompiledMacro) -> int:

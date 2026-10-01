@@ -279,3 +279,25 @@ def test_ports_are_ranked_adapter_board_unknown_builtin(monkeypatch):
 
     ordered = [port.device for port in list_ports()]
     assert ordered == [adapter.device, board.device, unknown.device, builtin.device]
+
+
+def test_connect_greets_again_when_the_first_hello_is_lost(fake_serial, monkeypatch):
+    # A board left mid-frame by a killed run swallows the first HELLO as the
+    # tail of that frame; only a second greeting gets an answer.
+    original_write = FakeSerial.write
+    dropped: list[bytes] = []
+
+    def lossy_write(self, data):
+        if not dropped and any(kind == MSG_HELLO for kind, _ in decode_frames(bytearray(data))):
+            dropped.append(bytes(data))
+            self.written += data
+            return len(data)
+        return original_write(self, data)
+
+    monkeypatch.setattr(FakeSerial, "write", lossy_write)
+    monkeypatch.setattr(SerialBridgeBackend, "HELLO_INTERVAL", 0.01)
+    backend = connected_backend(handshake_timeout=2.0)
+    assert backend.banner == "anyctrl-bridge/1 fake"
+    hellos = [kind for kind, _ in fake_serial.opened[0].sent_frames() if kind == MSG_HELLO]
+    assert len(hellos) >= 2
+    backend.close()
